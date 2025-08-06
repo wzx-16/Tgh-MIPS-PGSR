@@ -12,9 +12,13 @@
 import torch
 from torch.nn import functional as F
 import math
-from .diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
+#from diff_gaussian_rasterization_4d_abs import GaussianRasterizationSettings, GaussianRasterizer
+from diff_plane_rasterization_anti import GaussianRasterizationSettings as PlaneGaussianRasterizationSettings
+from diff_plane_rasterization_anti import GaussianRasterizer as PlaneGaussianRasterizer
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
+from utils.transformation_util import matrix_to_quaternion, quaternion_to_matrix
+from utils.graphics_utils import focal2fov, getProjectionMatrix, normal_from_depth_image
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
@@ -24,7 +28,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     """
  
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
-    screenspace_points = torch.zeros_like(pc.get_xyz, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
+    screenspace_points = torch.zeros_like(pc._rotation, dtype=pc.get_xyz.dtype, requires_grad=True, device="cuda") + 0
     try:
         screenspace_points.retain_grad()
     except:
@@ -189,3 +193,424 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "depth": depth,
             "alpha": alpha,
             "flow": flow}
+
+def render_3d_pgsr(
+    viewpoint_camera,
+    xyz: torch.Tensor,
+    colors: torch.Tensor,
+    opacities: torch.Tensor,
+    active_sh_degree,
+    scales: torch.Tensor,
+    rotations: torch.Tensor,
+    bg_color: torch.Tensor,
+    scaling_modifier = 1.0,
+    shs = None,
+    mask = None,
+    max_sh_channels=0,
+):
+    means3D = xyz
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    screenspace_points = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
+    screenspace_points_abs = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
+    
+    try:
+        screenspace_points.retain_grad()
+        screenspace_points_abs.retain_grad()
+    except:
+        pass
+    
+    means2D = screenspace_points
+    means2D_abs = screenspace_points_abs
+    opacity = opacities
+
+    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+    # scaling / rotation by the rasterizer.
+    # cov3D_precomp = None
+    # Set up rasterization configuration
+    FoVx = viewpoint_camera.FoVx
+    FoVy = viewpoint_camera.FoVy
+    tanfovx = math.tan(FoVx * 0.5)
+    tanfovy = math.tan(FoVy * 0.5)
+    # world_view_transform = extr.transpose(1, 0).cuda()
+    # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
+    # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
+    # camera_center = torch.linalg.inv(extr)[:3, 3]
+
+    raster_settings = PlaneGaussianRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree = active_sh_degree,
+            campos = viewpoint_camera.camera_center,
+            prefiltered=False,
+            render_geo=True,
+            debug=False
+        )
+
+    rasterizer = PlaneGaussianRasterizer(raster_settings = raster_settings)
+
+    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
+    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    assert not (shs is not None and colors is not None), "Cannot use both color and SH!"
+    if colors is not None:
+        colors_precomp = colors
+    else:
+        colors_precomp = None
+
+    if mask is not None:
+        means2D = means2D[mask]
+        means2D_abs = means2D_abs[mask]
+        means3D = means3D[mask]
+        if colors_precomp is not None:
+            colors_precomp = colors_precomp[mask]
+        if shs is not None:
+            shs = shs[mask]
+        # cov3D_precomp = cov3D_precomp[mask]
+        scales = scales[mask]
+        rotations = rotations[mask]
+        opacity = opacity[mask]
+
+    # cov = torch.cat([cov3D_precomp[..., :3], cov3D_precomp[..., 1:2], cov3D_precomp[..., 3:5], cov3D_precomp[..., 2:3], cov3D_precomp[..., 4:5], cov3D_precomp[..., 5:6]], dim=-1).reshape(-1, 3, 3)
+    # # # print(cov)
+    # eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    # # # scales = torch.ones_like(means3D[:, :3]) * 0.01
+    # scales = eigenvalues[:, :]**0.5# + 1e-6
+    # # print(scales.shape)
+    # # print(scales.mean(), scales.std(), scales.min(), scales.max())
+    # # mins, index = torch.min(eigenvalues[:, 0], dim=0, keepdim=True)
+    # # print(mins, cov3D_precomp[index])
+    # # # scales = scales * 0 + 0.01
+    # # # scales = scales.detach()
+    # # # scaling = gaussians_gpu.get_scaling
+    # rotations = eigenvectors.detach()# + 1e-6
+    # # rotations = eigenvectors#.detach()
+    # # print(rotations.mean(), scales.mean())
+    # # rotations = torch.zeros_like(means3D[:, [0]*4])
+    # # rot = gaussians_gpu.get_rotation
+    # # rotations[..., 0] = rotations[..., 0] + 1.0 # make sure the first quaternion component is always 1.0
+    # # rotations = rotations.detach()
+    # # print(cov, eigenvalues, eigenvectors)
+    global_normal = get_normal(scales, rotations, viewpoint_camera.camera_center, means3D)
+    local_normal = global_normal @ viewpoint_camera.world_view_transform[:3,:3]
+    pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
+    depth_z = pts_in_cam[:, 2]
+    local_distance = -(local_normal * pts_in_cam).sum(-1)
+    input_all_map = torch.zeros((means3D.shape[0], 5)).cuda().float()
+    input_all_map[:, :3] = local_normal
+    input_all_map[:, 3] = 1.0
+    input_all_map[:, 4] = local_distance
+
+    # print(local_distance.min().data, local_distance.mean().data, local_distance.max().data, 'ddd')
+    # print(torch.linalg.norm(input_all_map[:, :3], dim=-1).min(), torch.linalg.norm(input_all_map[:, :3], dim=-1).max(), 'ooo')
+
+    rendered_image, radii, out_observe, out_all_map, plane_depth = rasterizer(
+        means3D = means3D,
+        means2D = means2D,
+        means2D_abs = means2D_abs,
+        shs = shs,
+        colors_precomp = colors_precomp,
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        all_map = input_all_map,
+        # cov3D_precomp = cov3D_precomp
+        )
+
+    # ray = means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
+    # ray = ray / ray[..., 2:3]
+    # print(input_all_map[(input_all_map[:, 4] / -(input_all_map[:, 0] * ray[:, 0] + input_all_map[:, 1] * ray[:, 1] + input_all_map[:, 2] + 1.0e-8))<-1100], 'ppp')
+
+    if mask is not None:
+        radii_all = radii.new_zeros(mask.shape)
+        radii_all[mask] = radii
+        radii = radii_all
+
+    rendered_normal = out_all_map[0:3]
+    rendered_alpha = out_all_map[3:4, ]
+    rendered_distance = out_all_map[4:5, ]
+    # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
+    
+    return_dict =  {"render": rendered_image,
+                    "viewspace_points": screenspace_points,
+                    "viewspace_points_abs": screenspace_points_abs,
+                    "visibility_filter" : radii > 0,
+                    "radii": radii,
+                    "out_observe": out_observe,
+                    "rendered_normal": rendered_normal,
+                    "depth": plane_depth,
+                    "rendered_distance": rendered_distance,
+                    'alpha': rendered_alpha,
+                    # 'index': index,
+                    # 'scales': scales,
+                    }
+
+    # depth = plane_depth
+    # u_map = torch.ones((viewpoint_camera.image_height, 1), device=depth.device) * torch.arange(1, viewpoint_camera.image_width + 1, device=depth.device) - viewpoint_camera.cx  # u-u0
+    # v_map = torch.arange(1, viewpoint_camera.image_height + 1, device=depth.device).reshape(viewpoint_camera.image_height, 1) * torch.ones((1, viewpoint_camera.image_width), device=depth.device) - viewpoint_camera.cy  # v-v0
+
+    # VERSION = 'd2nt_v3'
+    # # get depth gradients
+    # if VERSION == 'd2nt_basic':
+    #     Gu, Gv = get_filter(depth[None])
+    # else:
+    #     Gu, Gv = get_DAG_filter(depth[None])
+
+    # # Depth to Normal Translation
+    # est_nx = Gu[0, 0] * viewpoint_camera.fl_x
+    # est_ny = Gv[0, 0] * viewpoint_camera.fl_y
+    # est_nz = -(depth[0] + v_map * Gv[0, 0] + u_map * Gu[0, 0])
+    # est_normal = torch.stack((est_nx, est_ny, est_nz), dim=0)
+    # # print(est_nx.shape)
+    # # exit()
+    # # vector normalization
+    
+    # est_normal = torch.nn.functional.normalize(est_normal[None], dim=1)
+
+    # # MRF-based Normal Refinement
+    # if VERSION == 'd2nt_v3':
+    #     est_normal = MRF_optim(depth[None], est_normal)
+
+    # depth_normal = est_normal[0]
+    # # print(depth_normal.mean())
+    depth_normal = render_normal(viewpoint_camera.intr, torch.linalg.inv(viewpoint_camera.extr), plane_depth.squeeze()) * (rendered_alpha).detach()
+    return_dict.update({"depth_normal": depth_normal})
+    
+    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+    # They will be excluded from value updates used in the splitting criteria.
+    return return_dict
+
+def render_3d_pgsr_anti(
+    viewpoint_camera,
+    xyz: torch.Tensor,
+    colors: torch.Tensor,
+    opacities: torch.Tensor,
+    active_sh_degree,
+    scales: torch.Tensor,
+    rotations: torch.Tensor,
+    bg_color: torch.Tensor,
+    scaling_modifier = 1.0,
+    shs = None,
+    mask = None,
+    max_sh_channels=0,
+):
+    means3D = xyz
+    # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
+    screenspace_points = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
+    screenspace_points_abs = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
+    
+    try:
+        screenspace_points.retain_grad()
+        screenspace_points_abs.retain_grad()
+    except:
+        pass
+    
+    means2D = screenspace_points
+    means2D_abs = screenspace_points_abs
+    opacity = opacities
+
+    # If precomputed 3d covariance is provided, use it. If not, then it will be computed from
+    # scaling / rotation by the rasterizer.
+    # cov3D_precomp = None
+    # Set up rasterization configuration
+    FoVx = viewpoint_camera.FoVx
+    FoVy = viewpoint_camera.FoVy
+    tanfovx = math.tan(FoVx * 0.5)
+    tanfovy = math.tan(FoVy * 0.5)
+    # world_view_transform = extr.transpose(1, 0).cuda()
+    # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
+    # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
+    # camera_center = torch.linalg.inv(extr)[:3, 3]
+
+    raster_settings = PlaneGaussianRasterizationSettings(
+            image_height=int(viewpoint_camera.image_height),
+            image_width=int(viewpoint_camera.image_width),
+            tanfovx=tanfovx,
+            tanfovy=tanfovy,
+            kernel_size=0.3,
+            bg=bg_color,
+            scale_modifier=scaling_modifier,
+            viewmatrix=viewpoint_camera.world_view_transform,
+            projmatrix=viewpoint_camera.full_proj_transform,
+            sh_degree = active_sh_degree,
+            campos = viewpoint_camera.camera_center,
+            prefiltered=False,
+            render_geo=True,
+            debug=False
+        )
+
+    rasterizer = PlaneGaussianRasterizer(raster_settings = raster_settings)
+
+    # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
+    # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
+    assert not (shs is not None and colors is not None), "Cannot use both color and SH!"
+    if colors is not None:
+        colors_precomp = colors
+    else:
+        colors_precomp = None
+
+    if mask is not None:
+        means2D = means2D[mask]
+        means2D_abs = means2D_abs[mask]
+        means3D = means3D[mask]
+        if colors_precomp is not None:
+            colors_precomp = colors_precomp[mask]
+        if shs is not None:
+            shs = shs[mask]
+        # cov3D_precomp = cov3D_precomp[mask]
+        scales = scales[mask]
+        rotations = rotations[mask]
+        opacity = opacity[mask]
+
+    # cov = torch.cat([cov3D_precomp[..., :3], cov3D_precomp[..., 1:2], cov3D_precomp[..., 3:5], cov3D_precomp[..., 2:3], cov3D_precomp[..., 4:5], cov3D_precomp[..., 5:6]], dim=-1).reshape(-1, 3, 3)
+    # # # print(cov)
+    # eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+    # # # scales = torch.ones_like(means3D[:, :3]) * 0.01
+    # scales = eigenvalues[:, :]**0.5# + 1e-6
+    # # print(scales.shape)
+    # # print(scales.mean(), scales.std(), scales.min(), scales.max())
+    # # mins, index = torch.min(eigenvalues[:, 0], dim=0, keepdim=True)
+    # # print(mins, cov3D_precomp[index])
+    # # # scales = scales * 0 + 0.01
+    # # # scales = scales.detach()
+    # # # scaling = gaussians_gpu.get_scaling
+    # rotations = eigenvectors.detach()# + 1e-6
+    # # rotations = eigenvectors#.detach()
+    # # print(rotations.mean(), scales.mean())
+    # # rotations = torch.zeros_like(means3D[:, [0]*4])
+    # # rot = gaussians_gpu.get_rotation
+    # # rotations[..., 0] = rotations[..., 0] + 1.0 # make sure the first quaternion component is always 1.0
+    # # rotations = rotations.detach()
+    # # print(cov, eigenvalues, eigenvectors)
+    global_normal = get_normal(scales, rotations, viewpoint_camera.camera_center, means3D)
+    local_normal = global_normal @ viewpoint_camera.world_view_transform[:3,:3]
+    pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
+    depth_z = pts_in_cam[:, 2]
+    local_distance = -(local_normal * pts_in_cam).sum(-1)
+    input_all_map = torch.zeros((means3D.shape[0], 5)).cuda().float()
+    input_all_map[:, :3] = local_normal
+    input_all_map[:, 3] = 1.0
+    input_all_map[:, 4] = local_distance
+
+    # print(local_distance.min().data, local_distance.mean().data, local_distance.max().data, 'ddd')
+    # print(torch.linalg.norm(input_all_map[:, :3], dim=-1).min(), torch.linalg.norm(input_all_map[:, :3], dim=-1).max(), 'ooo')
+
+    rendered_image, radii, out_observe, out_all_map, plane_depth = rasterizer(
+        means3D = means3D,
+        means2D = means2D,
+        means2D_abs = means2D_abs,
+        shs = shs,
+        colors_precomp = colors_precomp,
+        opacities = opacity,
+        scales = scales,
+        rotations = rotations,
+        all_map = input_all_map,
+        # cov3D_precomp = cov3D_precomp
+        )
+
+    # ray = means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
+    # ray = ray / ray[..., 2:3]
+    # print(input_all_map[(input_all_map[:, 4] / -(input_all_map[:, 0] * ray[:, 0] + input_all_map[:, 1] * ray[:, 1] + input_all_map[:, 2] + 1.0e-8))<-1100], 'ppp')
+
+    if mask is not None:
+        radii_all = radii.new_zeros(mask.shape)
+        radii_all[mask] = radii
+        radii = radii_all
+
+    rendered_normal = out_all_map[0:3]
+    rendered_alpha = out_all_map[3:4, ]
+    rendered_distance = out_all_map[4:5, ]
+    # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
+    
+    return_dict =  {"render": rendered_image,
+                    "viewspace_points": screenspace_points,
+                    "viewspace_points_abs": screenspace_points_abs,
+                    "visibility_filter" : radii > 0,
+                    "radii": radii,
+                    "out_observe": out_observe,
+                    "rendered_normal": rendered_normal,
+                    "depth": plane_depth,
+                    "rendered_distance": rendered_distance,
+                    'alpha': rendered_alpha,
+                    # 'index': index,
+                    # 'scales': scales,
+                    }
+
+    # depth = plane_depth
+    # u_map = torch.ones((viewpoint_camera.image_height, 1), device=depth.device) * torch.arange(1, viewpoint_camera.image_width + 1, device=depth.device) - viewpoint_camera.cx  # u-u0
+    # v_map = torch.arange(1, viewpoint_camera.image_height + 1, device=depth.device).reshape(viewpoint_camera.image_height, 1) * torch.ones((1, viewpoint_camera.image_width), device=depth.device) - viewpoint_camera.cy  # v-v0
+
+    # VERSION = 'd2nt_v3'
+    # # get depth gradients
+    # if VERSION == 'd2nt_basic':
+    #     Gu, Gv = get_filter(depth[None])
+    # else:
+    #     Gu, Gv = get_DAG_filter(depth[None])
+
+    # # Depth to Normal Translation
+    # est_nx = Gu[0, 0] * viewpoint_camera.fl_x
+    # est_ny = Gv[0, 0] * viewpoint_camera.fl_y
+    # est_nz = -(depth[0] + v_map * Gv[0, 0] + u_map * Gu[0, 0])
+    # est_normal = torch.stack((est_nx, est_ny, est_nz), dim=0)
+    # # print(est_nx.shape)
+    # # exit()
+    # # vector normalization
+    
+    # est_normal = torch.nn.functional.normalize(est_normal[None], dim=1)
+
+    # # MRF-based Normal Refinement
+    # if VERSION == 'd2nt_v3':
+    #     est_normal = MRF_optim(depth[None], est_normal)
+
+    # depth_normal = est_normal[0]
+    # # print(depth_normal.mean())
+    depth_normal = render_normal(viewpoint_camera.intr, torch.linalg.inv(viewpoint_camera.extr), plane_depth.squeeze()) * (rendered_alpha).detach()
+    return_dict.update({"depth_normal": depth_normal})
+    
+    # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
+    # They will be excluded from value updates used in the splitting criteria.
+    return return_dict
+
+# def get_smallest_axis(scaling, rotation, return_idx=False):
+#     rotation_matrices = rotation
+#     smallest_axis_idx = scaling.min(dim=-1)[1][..., None, None].expand(-1, 3, -1)
+#     smallest_axis = rotation_matrices.gather(2, smallest_axis_idx)
+#     if return_idx:
+#         return smallest_axis.squeeze(dim=2), smallest_axis_idx[..., 0, 0]
+#     return smallest_axis.squeeze(dim=2)
+
+def get_smallest_axis(scaling, rotation, return_idx=False):
+    rotation_matrices = get_rotation_matrix(rotation)
+    smallest_axis_idx = scaling.min(dim=-1)[1][..., None, None].expand(-1, 3, -1)
+    smallest_axis = rotation_matrices.gather(2, smallest_axis_idx)
+    if return_idx:
+        return smallest_axis.squeeze(dim=2), smallest_axis_idx[..., 0, 0]
+    return smallest_axis.squeeze(dim=2)
+
+def get_normal(scaling, rotation, camera_center, xyz):
+    normal_global = get_smallest_axis(scaling, rotation)
+    # normal_global = rotation
+    gaussian_to_cam_global = camera_center - xyz
+    neg_mask = (normal_global * gaussian_to_cam_global).sum(-1) < 0.0
+    normal_global[neg_mask] = -normal_global[neg_mask]
+    return normal_global
+
+def get_rotation_matrix(rotation):
+    return quaternion_to_matrix(rotation)
+
+def render_normal(intrinsic_matrix, extrinsic_matrix, depth, offset=None, normal=None, scale=1):
+    # depth: (H, W), bg_color: (3), alpha: (H, W)
+    # normal_ref: (3, H, W)
+    st = max(int(scale/2)-1,0)
+    if offset is not None:
+        offset = offset[st::scale,st::scale]
+    normal_ref = normal_from_depth_image(depth[st::scale,st::scale], 
+                                            intrinsic_matrix.to(depth.device), 
+                                            extrinsic_matrix.to(depth.device), offset)
+
+    normal_ref = normal_ref.permute(2,0,1)
+    return normal_ref

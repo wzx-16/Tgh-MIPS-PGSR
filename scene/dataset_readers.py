@@ -431,7 +431,480 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pt
                            ply_path=ply_path_origin)
     return scene_info
 
+class FileStorage(object):
+    def __init__(self, filename, isWrite=False):
+        version = cv2.__version__
+        self.major_version = int(version.split('.')[0])
+        self.second_version = int(version.split('.')[1])
+
+        if isWrite:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            self.fs = open(filename, 'w')
+            self.fs.write('%YAML:1.0\r\n')
+            self.fs.write('---\r\n')
+        else:
+            assert os.path.exists(filename), filename
+            self.fs = cv2.FileStorage(filename, cv2.FILE_STORAGE_READ)
+        self.isWrite = isWrite
+
+    def __del__(self):
+        if self.isWrite:
+            self.fs.close()
+        else:
+            cv2.FileStorage.release(self.fs)
+
+    def _write(self, out):
+        self.fs.write(out + '\r\n')
+
+    def write(self, key, value, dt='mat'):
+        if dt == 'mat':
+            self._write('{}: !!opencv-matrix'.format(key))
+            self._write('  rows: {}'.format(value.shape[0]))
+            self._write('  cols: {}'.format(value.shape[1]))
+            self._write('  dt: d')
+            self._write('  data: [{}]'.format(', '.join(['{:.10f}'.format(i) for i in value.reshape(-1)])))
+        elif dt == 'list':
+            self._write('{}:'.format(key))
+            for elem in value:
+                self._write('  - "{}"'.format(elem))
+        elif dt == 'real':
+            if isinstance(value, np.ndarray):
+                value = value.item()
+            self._write('{}: {:.10f}'.format(key, value))  # as accurate as possible
+        else:
+            raise NotImplementedError
+
+    def read(self, key, dt='mat'):
+        if dt == 'mat':
+            output = self.fs.getNode(key).mat()
+        elif dt == 'list':
+            results = []
+            n = self.fs.getNode(key)
+            for i in range(n.size()):
+                val = n.at(i).string()
+                if val == '':
+                    val = str(int(n.at(i).real()))
+                if val != 'none':
+                    results.append(val)
+            output = results
+        elif dt == 'real':
+            output = self.fs.getNode(key).real()
+        else:
+            raise NotImplementedError
+        return output
+
+    def close(self):
+        self.__del__(self)
+
+def readZJUCameras(path, white_background, cam_names=[], time_duration=None, frame_ratio=1, dataloader=False):
+    extri_path = os.path.join(path, 'extri.yml')
+    intri_path = os.path.join(path, 'intri.yml')
+    assert os.path.exists(intri_path), intri_path
+    assert os.path.exists(extri_path), extri_path
+
+    intri = FileStorage(intri_path)
+    extri = FileStorage(extri_path)
+    cam_infos = []
+    cam_names = intri.read('names', dt='list')
+    idx = 0
+    cams = []
+    frames = int(extri.read('frames', dt='real'))
+    with open(os.path.join(path, 'sync.json'), 'r') as f:
+        sync_json = json.load(f)
+    
+    for cam in cam_names:
+        if cam in ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008', '0009', '0014', '0018', '0019', '0020', '0021', '0022', '0023']:
+            continue
+        # Intrinsics
+        K = intri.read('K_{}'.format(cam))
+        H = int(intri.read('H_{}'.format(cam), dt='real')) or -1
+        W = int(intri.read('W_{}'.format(cam), dt='real')) or -1
+        invK = np.linalg.inv(K)
+
+        # Extrinsics
+        Tvec = extri.read('T_{}'.format(cam))
+        Rvec = extri.read('R_{}'.format(cam))
+        if Rvec is not None: R = cv2.Rodrigues(Rvec)[0]
+        else:
+            R = extri.read('Rot_{}'.format(cam))
+            Rvec = cv2.Rodrigues(R)[0]
+        RT = np.hstack((R, Tvec))
+
+        R = R
+        T = Tvec
+        # C = - Rvec.T @ Tvec
+        # RT = RT
+        # Rvec = Rvec
+        # P = K @ RT
+
+        w2c = np.vstack((RT, np.array([0, 0, 0, 1])))
+        # c2w = np.linalg.inv(w2c)
+        
+        # cams.append((c2w[:3, 0] + c2w[:3, 3], c2w[:3, 1] + c2w[:3, 3], c2w[:3, 2] + c2w[:3, 3], c2w[:3, 3]))
+        # get the world-to-camera transform and set R, T
+        # w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+        T = w2c[:3, 3]
+        
+        # Distortion
+        D = intri.read('D_{}'.format(cam))
+        if D is None: D = intri.read('dist_{}'.format(cam))
+        D = D
+        distort = D
+        # distort = np.array(cam_data[cam_id]['distCoeff'][0:2]+cam_data[cam_id]['distCoeff'][3:5])
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, distort, (W, H), 1, (W, H))
+        mapx, mapy = cv2.initUndistortRectifyMap(K, distort, None, new_camera_matrix, (W, H), cv2.CV_32FC1)
+        K = new_camera_matrix
+        # intr_mat[:2] /= 2
+        # intr_mats.append(new_camera_matrix)
+        
+        # distortions.append((mapx, mapy))
+        # # Time input
+        # t = extri.read('t_{}'.format(cam), dt='real') or 0  # temporal index, might all be 0
+        # v = extri.read('v_{}'.format(cam), dt='real') or 0  # temporal index, might all be 0
+
+        # # Bounds, could be overwritten
+        # n = extri.read('n_{}'.format(cam), dt='real') or 0.0001  # temporal index, might all be 0
+        # f = extri.read('f_{}'.format(cam), dt='real') or 1e6  # temporal index, might all be 0
+        # bounds = extri.read('bounds_{}'.format(cam))
+        # bounds = np.array([[-1e6, -1e6, -1e6], [1e6, 1e6, 1e6]]) if bounds is None else bounds
+
+        # # CCM
+        # ccm = intri.read('ccm_{}'.format(cam))
+        # ccm = np.eye(3) if ccm is None else ccm
+        
+        FovX = np.arctan2(W / 2.0, K[0, 0]) * 2.0
+        FovY = np.arctan2(H / 2.0, K[1, 1]) * 2.0
+        # read json file from a.json
+            
+        for ii in range(0, frames, 1):
+            timestamp = ii / 60. - sync_json[cam] # Assuming 60 fps, adjust if needed
+            if frame_ratio > 1:
+                timestamp /= frame_ratio
+            if time_duration is not None:
+                if timestamp < time_duration[0]:
+                    continue
+                if timestamp > time_duration[1]:
+                    break
+            image_path = os.path.join(path, 'images', f'cam{cam}_{ii:06d}.jpg') # .replace('hdImgs_unditorted', 'hdImgs_unditorted_rgba').replace('.jpg', '.png')
+            image_name = f'cam{cam}_{ii:06d}'
+            
+            if not dataloader:
+                with Image.open(image_path) as image_load:
+                    im_data = np.array(image_load.convert("RGBA"))
+
+                bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+                norm_data = im_data / 255.0
+                arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+                if norm_data[:, :, 3:4].min() < 1:
+                    arr = np.concatenate([arr, norm_data[:, :, 3:4]], axis=2)
+                    image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGBA")
+                else:
+                    image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            else:
+                image = np.empty(0)
+            
+            cam_infos.append(CameraInfo(uid=idx + ii * len(cam_names), R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=None,
+                            image_path=image_path, image_name=image_name, width=W, height=H, timestamp=timestamp,
+                            fl_x=K[0, 0], fl_y=K[1, 1], cx=K[0, 2], cy=K[1, 2]))
+        idx += 1
+    # #save .obj
+    # # if not os.path.exists(os.path.join(path, 'cams.obj')):
+    # ii = 0
+    # points = []
+    # with open(os.path.join(path, 'cams.obj'), 'w') as f:
+    #     for idx, cam in enumerate(cams):
+    #         f.write(f"v {cam[3][0]} {cam[3][1]} {cam[3][2]} 1 1 1\n")
+    #         f.write(f"v {cam[0][0]} {cam[0][1]} {cam[0][2]} 1 0 1\n")
+    #         f.write(f"v {cam[1][0]} {cam[1][1]} {cam[1][2]} 0 1 0\n")
+    #         f.write(f"v {cam[2][0]} {cam[2][1]} {cam[2][2]} 0 0 1\n")
+            
+    #     for ii in range(0, len(cams), 1):
+    #         f.write(f"l {ii*4+1} {ii*4+2}\n")
+    #         f.write(f"l {ii*4+1} {ii*4+3}\n")
+    #         f.write(f"l {ii*4+1} {ii*4+4}\n")
+    # exit()
+    # # Average
+    # avg_c2w_R = extri.read('avg_c2w_R')
+    # avg_c2w_T = extri.read('avg_c2w_T')
+    # if avg_c2w_R is not None: cams.avg_c2w_R = avg_c2w_R
+    # if avg_c2w_T is not None: cams.avg_c2w_T = avg_c2w_T
+
+    return cam_infos
+
+def readZJUInfo(path, white_background, num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False):
+    print("Reading Training Set")
+    train_cam_infos = readZJUCameras(path, white_background, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader)
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    if pcd.points.shape[0] > num_pts:
+        mask = np.random.randint(0, pcd.points.shape[0], num_pts)
+        # mask = fps(torch.from_numpy(pcd.points).cuda()[None], num_pts).cpu().numpy()
+        if pcd.time is not None:
+            times = pcd.time[mask]
+        else:
+            times = None
+        xyz = pcd.points[mask]
+        rgb = pcd.colors[mask]
+        normals = pcd.normals[mask]
+        if times is not None:
+            time_mask = (times[:,0] < time_duration[1]) & (times[:,0] > time_duration[0])
+            xyz = xyz[time_mask]
+            rgb = rgb[time_mask]
+            normals = normals[time_mask]
+            times = times[time_mask]
+        pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=times)
+        
+    if num_extra_pts > 0:
+        times = pcd.time
+        xyz = pcd.points
+        rgb = pcd.colors
+        normals = pcd.normals
+        bound_min, bound_max = xyz.min(0), xyz.max(0)
+        radius = 60.0 # (bound_max - bound_min).mean() + 10
+        phi = 2.0 * np.pi * np.random.rand(num_extra_pts)
+        theta = np.arccos(2.0 * np.random.rand(num_extra_pts) - 1.0)
+        x = radius * np.sin(theta) * np.cos(phi)
+        y = radius * np.sin(theta) * np.sin(phi)
+        z = radius * np.cos(theta)
+        xyz_extra = np.stack([x, y, z], axis=1)
+        normals_extra = np.zeros_like(xyz_extra)
+        rgb_extra = np.ones((num_extra_pts, 3)) / 2
+        
+        xyz = np.concatenate([xyz, xyz_extra], axis=0)
+        rgb = np.concatenate([rgb, rgb_extra], axis=0)
+        normals = np.concatenate([normals, normals_extra], axis=0)
+        
+        if times is not None:
+            times_extra = torch.zeros(((num_extra_pts, 3))) + (time_duration[0] + time_duration[1]) / 2
+            times = np.concatenate([times, times_extra], axis=0)
+            
+        pcd = BasicPointCloud(points=xyz, 
+                              colors=rgb,
+                              normals=normals,
+                              time=times)
+        
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=train_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+def readTHUCameras(path, white_background, cam_names=[], time_duration=None, frame_ratio=1, dataloader=False):
+    with open(os.path.join(path, 'calibration_full.json'), 'r') as f:
+        calib = json.load(f)
+        
+    poses = []
+    Ks = []
+    mapxy = []
+    cam_names = []
+    for k in calib.keys():
+        # if int(k) > 53:
+        #     continue
+        cam_names.append(k)
+        RT = np.eye(4)
+        RT[:3, :3] = np.array(calib[k]['R']).reshape((3,3))
+        RT[:3, 3] = np.array(calib[k]['T'])
+        # RT = np.linalg.inv(RT)  # convert to world to camera
+        W, H = calib[k]['imgSize'][0], calib[k]['imgSize'][1]
+        poses.append(RT)
+        K = np.array(calib[k]['K']).reshape((3,3))
+        D = np.array(calib[k]['distCoeff'])
+        
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
+        mapx, mapy = cv2.initUndistortRectifyMap(K, D, None, new_camera_matrix, (W, H), cv2.CV_32FC1)
+        
+        new_camera_matrix[0, 2] -= 100
+        new_camera_matrix[1, 2] -= 100
+        
+        W, H = W - 200, H - 200
+        new_camera_matrix[:2] /= 2
+        W, H = W // 2, H // 2
+        Ks.append(new_camera_matrix)
+        mapxy.append((mapx, mapy))
+    idx = 0
+    cam_infos = []
+    frames = 10000
+    # with open(os.path.join(path, 'sync.json'), 'r') as f:
+    #     sync_json = json.load(f)
+    
+    for index_ii, cam in enumerate(cam_names):
+        # if cam in ['0000', '0001', '0002', '0003', '0004', '0005', '0006', '0007', '0008', '0009', '0014', '0018', '0019', '0020', '0021', '0022', '0023']:
+        #     continue
+        # Intrinsics
+        aa = list(range(1, 61, 1))
+        aa += list(range(3, 61, 9))
+        if int(cam) not in aa or int(cam) == 28:
+            continue
+        if int(cam) in [14, 16, 19, 20, 21, 22, 24, 25, 26, 28, 29, 25, 35, 42, 43, 45]:
+            continue
+        # if int(cam) == 22:
+        #     continue
+        # if int(cam) == 42:
+        #     continue
+        K = Ks[index_ii]
+
+        # Extrinsics
+        RT = poses[index_ii][:3]
+
+        R = RT[:3 ,:3]
+        T = RT[:3, 3]
+        # C = - Rvec.T @ Tvec
+        # RT = RT
+        # Rvec = Rvec
+        # P = K @ RT
+
+        w2c = np.vstack((RT, np.array([0, 0, 0, 1])))
+        # c2w = np.linalg.inv(w2c)
+        
+        # cams.append((c2w[:3, 0] + c2w[:3, 3], c2w[:3, 1] + c2w[:3, 3], c2w[:3, 2] + c2w[:3, 3], c2w[:3, 3]))
+        # get the world-to-camera transform and set R, T
+        # w2c = np.linalg.inv(c2w)
+        R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
+        T = w2c[:3, 3]
+        
+        # Distortion
+        mapx, mapy = mapxy[index_ii][0], mapxy[index_ii][1]
+        
+        FovX = np.arctan2(W / 2.0, K[0, 0]) * 2.0
+        FovY = np.arctan2(H / 2.0, K[1, 1]) * 2.0
+        # read json file from a.json
+        fps = 50. # Assuming 50 fps, adjust if needed
+        for ii in range(0, frames, 1):
+            # if ii < 1000 or ii > 1150:
+            #     continue
+            timestamp = ii / fps
+            if frame_ratio > 1:
+                timestamp /= frame_ratio
+            if time_duration is not None:
+                if timestamp < time_duration[0]:
+                    continue
+                if timestamp > time_duration[1]:
+                    break
+            # image_path = os.path.join(path, 'images', f'cam{cam}_{ii:06d}.jpg') # .replace('hdImgs_unditorted', 'hdImgs_unditorted_rgba').replace('.jpg', '.png')
+            image_path = os.path.join('/media/bbnc/Elements/abuzabi', cam, f'cam{cam}_{ii:06d}.jpg')
+            image_name = f'cam{cam}_{ii:06d}'
+            
+            if not dataloader:
+                with Image.open(image_path) as image_load:
+                    im_data = np.array(image_load.convert("RGBA"))
+
+                bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+                norm_data = im_data / 255.0
+                arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+                if norm_data[:, :, 3:4].min() < 1:
+                    arr = np.concatenate([arr, norm_data[:, :, 3:4]], axis=2)
+                    image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGBA")
+                else:
+                    image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+            else:
+                image = np.empty(0)
+            
+            cam_infos.append(CameraInfo(uid=idx + ii * len(cam_names), R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=None,
+                            image_path=image_path, image_name=image_name, width=W, height=H, timestamp=(timestamp - time_duration[0])/1,
+                            fl_x=K[0, 0], fl_y=K[1, 1], cx=K[0, 2], cy=K[1, 2]))
+        idx += 1
+
+    return cam_infos
+
+def readTHUInfo(path, white_background, num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False):
+    print("Reading Training Set")
+    train_cam_infos = readTHUCameras(path, white_background, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader)
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    if pcd.points.shape[0] > num_pts:
+        mask = np.random.randint(0, pcd.points.shape[0], num_pts)
+        # mask = fps(torch.from_numpy(pcd.points).cuda()[None], num_pts).cpu().numpy()
+        if pcd.time is not None:
+            times = pcd.time[mask]
+        else:
+            times = None
+        xyz = pcd.points[mask]
+        rgb = pcd.colors[mask]
+        normals = pcd.normals[mask]
+        if times is not None:
+            time_mask = (times[:,0] < time_duration[1]) & (times[:,0] > time_duration[0])
+            xyz = xyz[time_mask]
+            rgb = rgb[time_mask]
+            normals = normals[time_mask]
+            times = times[time_mask]
+        pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=times)
+        
+    if num_extra_pts > 0:
+        times = pcd.time
+        xyz = pcd.points
+        rgb = pcd.colors
+        normals = pcd.normals
+        bound_min, bound_max = xyz.min(0), xyz.max(0)
+        radius = 60.0 # (bound_max - bound_min).mean() + 10
+        phi = 2.0 * np.pi * np.random.rand(num_extra_pts)
+        theta = np.arccos(2.0 * np.random.rand(num_extra_pts) - 1.0)
+        x = radius * np.sin(theta) * np.cos(phi)
+        y = radius * np.sin(theta) * np.sin(phi)
+        z = radius * np.cos(theta)
+        xyz_extra = np.stack([x, y, z], axis=1)
+        normals_extra = np.zeros_like(xyz_extra)
+        rgb_extra = np.ones((num_extra_pts, 3)) / 2
+        
+        xyz = np.concatenate([xyz, xyz_extra], axis=0)
+        rgb = np.concatenate([rgb, rgb_extra], axis=0)
+        normals = np.concatenate([normals, normals_extra], axis=0)
+        
+        if times is not None:
+            times_extra = torch.zeros(((num_extra_pts, 3))) + (time_duration[0] + time_duration[1]) / 2
+            times = np.concatenate([times, times_extra], axis=0)
+            
+        pcd = BasicPointCloud(points=xyz, 
+                              colors=rgb,
+                              normals=normals,
+                              time=times)
+        
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=train_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    'THU': readTHUInfo,
 }

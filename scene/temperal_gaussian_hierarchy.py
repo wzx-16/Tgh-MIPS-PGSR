@@ -14,7 +14,7 @@ import time
 class TemperalGaussianHierarchy():
 
     def __init__(self, sh_degree : int, level_count : int, max_layer_length : float, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, 
-                 force_sh_3d: bool = False, sh_degree_t : int = 0):
+                 force_sh_3d: bool = False, sh_degree_t : int = 0, device="cuda", opt=None):
         self.sh_degree = sh_degree
         self.gaussian_dim = gaussian_dim
         self.rot_4d = rot_4d
@@ -23,63 +23,60 @@ class TemperalGaussianHierarchy():
         self.level_count = level_count
         self.max_layer_length = max_layer_length
         self.time_duration = time_duration
-        static_layer = GaussianModel(sh_degree, gaussian_dim, time_duration, rot_4d, force_sh_3d, sh_degree_t)
+        static_layer = GaussianModel(sh_degree, gaussian_dim, time_duration, rot_4d, force_sh_3d, sh_degree_t, device=device)
         self.layers = [[static_layer]]
+        current_layer_length = max_layer_length
+        self.layer_segment_len = [2e5]
+        self.layer_segment_cnt = [1]
         for level in range(1, level_count + 1):
-            current_layer_length = max_layer_length / 2**(level - 1)
             current_layer = []
             # offset may need one more
+            self.layer_segment_len.append(current_layer_length)
             segment_count = math.ceil((time_duration[1] - time_duration[0]) / current_layer_length) + 1
+            self.layer_segment_cnt.append(segment_count)
             for ind in range(segment_count):
-                segment = GaussianModel(sh_degree, gaussian_dim, time_duration, rot_4d, force_sh_3d, sh_degree_t)
+                segment = GaussianModel(sh_degree, gaussian_dim, time_duration, rot_4d, force_sh_3d, sh_degree_t, device=device)
                 current_layer.append(segment)
 
             self.layers.append(current_layer)
+            current_layer_length = current_layer_length / 2
+        self.min_layer_length = current_layer_length * 2
+        self.device = device
+        self.opt = opt
 
-    def create_from_gaussians(self, gaussians : GaussianModel, opt, o_th : float = 0.05):
-        mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+    def create_from_gaussians(self, gaussians : GaussianModel, o_th : float = 0.05):
+        # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+        mean_t, cov_t = gaussians.get_t, gaussians.get_sigma_t
         #o_th_cuda = torch.full((), o_th)
         effect_range = torch.sqrt(-2 * torch.log(torch.tensor(o_th, device="cuda")) * cov_t)
-        gaussians_start = torch.clamp(mean_t - effect_range, min=0)
-        gaussians_end = torch.clamp(mean_t + effect_range, min= 0)
+        gaussians_start = mean_t - effect_range
+        gaussians_end = mean_t + effect_range
+        print(gaussians_start[0], gaussians_end[0])
         #gaussians_last_level_ind = torch.zeros(gaussians_start.shape[0], device="cuda")
         mask = torch.full(gaussians_start.shape, True, dtype=torch.bool, device="cuda").squeeze(-1)
-        # gaussians_last_level_end = torch.empty(gaussians_end.shape[0])
-        # mask = torch.empty(self.level_count, gaussians_end.shape[0])
-        # for level in range(1, self.level_count + 1):
-        #     last_layer_length = 0 if level == 1 else self.max_layer_length / 2**(level - 2)
-        #     current_length = self.max_layer_length / 2**(level - 1)
-        #     gaussians_level_start = torch.floor(gaussians_start / current_length).squeeze(-1)
-        #     gaussians_level_end = torch.floor(gaussians_end / current_length).squeeze(-1)
-        #     #mask = (mask & (gaussians_level_start != gaussians_level_end))
-        #     last_segment_count = 1 if level == 1 else math.ceil((self.time_duration[1] - self.time_duration[0]) / last_layer_length)
-        #     for ind in range(last_segment_count):
-        #         self.layers[level - 1][ind].clone_by_mask(mask & (gaussians_level_start != gaussians_level_end) & (ind == gaussians_last_level_ind), gaussians, opt, None)
-            
-        #     #mask = ~mask
-        #     mask = (mask & (gaussians_level_start == gaussians_level_end))
 
-        #     if level == self.level_count:
-        #         for ind in range(math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)):
-        #             self.layers[level][ind].clone_by_mask(mask & (ind == gaussians_level_start), gaussians, opt, None)
-        #     gaussians_last_level_ind = gaussians_level_start
-
-        for level in range(self.level_count, -1, -1):
-            current_length = self.max_layer_length / 2**(level - 1)
-            offset = self.max_layer_length / 2**(level + 1)
-            gaussians_level_start = torch.floor((gaussians_start + offset) / current_length).squeeze(-1)
-            gaussians_level_end = torch.floor((gaussians_end + offset) / current_length).squeeze(-1)
-            segment_count = 1 if level == 0 else (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+        current_length = self.min_layer_length
+        for level in range(self.level_count, 0, -1):
+            offset = current_length / 4
+            gaussians_level_start = torch.floor((gaussians_start + offset) / current_length).squeeze(-1).int()
+            gaussians_level_end = torch.floor((gaussians_end + offset) / current_length).squeeze(-1).int()
+            segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+            active_mask = mask & (gaussians_level_start == gaussians_level_end)# & (gaussians_level_start >= 0) & (gaussians_level_start < segment_count)
             for ind in range(segment_count):
-                self.layers[level][ind].clone_by_mask(mask & (gaussians_level_start == gaussians_level_end) & (ind == gaussians_level_start), gaussians, opt, None)
+                actual_mask = active_mask & (ind == gaussians_level_start)
+                self.layers[level][ind].append_from_gaussians_gpu(actual_mask, gaussians, None)
             
             mask = mask & (gaussians_level_start != gaussians_level_end)
-
+            current_length = current_length * 2
+            
+        self.layers[0][0].append_from_gaussians_gpu(mask, gaussians, None)
+        
     def update_from_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
-        mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+        # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+        mean_t, cov_t = gaussians.get_t, gaussians.get_sigma_t
         effect_range = torch.sqrt(-2 * torch.log(torch.tensor(o_th, device="cuda")) * cov_t)
-        gaussians_start = torch.clamp(mean_t - effect_range, min=0)
-        gaussians_end = torch.clamp(mean_t + effect_range, min= 0)
+        gaussians_start = mean_t - effect_range
+        gaussians_end = mean_t + effect_range
         #gaussians_last_level_ind = torch.zeros(gaussians_start.shape[0], dtype=torch.int64, device = "cuda")
         mask = torch.full(gaussians_start.shape, True, dtype=torch.bool, device="cuda").squeeze(-1)
         # for level in range(1, self.level_count + 1):
@@ -145,20 +142,19 @@ class TemperalGaussianHierarchy():
         #             replace_idx = math.floor(gaussians.current_timestamp / current_length)
         #             self.layers[level][replace_idx].clone_by_mask(mask & (replace_idx == gaussians_level_start), gaussians, opt, new_gaussians)
         #     gaussians_last_level_ind = gaussians_level_start
-
-        for level in range(self.level_count, -1, -1):
-            current_length = self.max_layer_length / 2**(level - 1)
-            offset = self.max_layer_length / 2**(level + 1)
-            gaussians_level_start = torch.floor((gaussians_start + offset) / current_length).to(torch.int64).squeeze(-1)
-            gaussians_level_end = torch.floor((gaussians_end + offset) / current_length).to(torch.int64).squeeze(-1)
-            segment_count = 1 if level == 0 else (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
-            active_mask = mask & (gaussians_level_start == gaussians_level_end)
-            replace_ind = 0 if level == 0 else math.floor((gaussians.current_timestamp + offset) / current_length)
+        current_length = self.min_layer_length
+        for level in range(self.level_count, 0, -1):
+            offset = current_length / 4
+            gaussians_level_start = torch.floor((gaussians_start + offset) / current_length).squeeze(-1).int()
+            gaussians_level_end = torch.floor((gaussians_end + offset) / current_length).squeeze(-1).int()
+            segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+            active_mask = mask & (gaussians_level_start == gaussians_level_end)# & (gaussians_level_start >= 0) & (gaussians_level_start < segment_count)
+            replace_ind = math.floor((gaussians.current_timestamp + offset) / current_length)
             segments_for_update = torch.unique(gaussians_level_start[active_mask], sorted = False)
             replace_flag = False
             for ind in segments_for_update:
                 idx = ind.item()
-                if idx >= segment_count:
+                if idx >= segment_count or idx < 0:
                     continue
                 actual_mask = active_mask & (idx == gaussians_level_start)
                 if idx == replace_ind:
@@ -167,12 +163,16 @@ class TemperalGaussianHierarchy():
                 else:
                     self.layers[level][idx].append_from_gaussians_gpu(actual_mask, gaussians, new_gaussians)
             if not replace_flag:
-                self.layers[level][replace_ind].clone_by_mask(active_mask & (replace_ind == gaussians_level_start), gaussians, opt, new_gaussians)
+                self.layers[level][replace_ind].clear_gaussians(gaussians)
             
             mask = mask & (gaussians_level_start != gaussians_level_end)
+            current_length = current_length * 2
+            
+        self.layers[0][0].clone_by_mask(mask, gaussians, opt, new_gaussians)
 
     def update_to_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
-        mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+        # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
+        mean_t, cov_t = gaussians.get_t, gaussians.get_sigma_t
         effect_range = torch.sqrt(-2 * torch.log(torch.tensor(o_th, device="cuda")) * cov_t)
         gaussians_start = torch.clamp(mean_t - effect_range, min=0)
         gaussians_end = torch.clamp(mean_t + effect_range, min= 0)
@@ -242,14 +242,14 @@ class TemperalGaussianHierarchy():
         #             self.layers[level][replace_idx].clone_by_mask(mask & (replace_idx == gaussians_level_start), gaussians, opt, new_gaussians)
         #     gaussians_last_level_ind = gaussians_level_start
 
-        for level in range(self.level_count, -1, -1):
-            current_length = self.max_layer_length / 2**(level - 1)
-            offset = self.max_layer_length / 2**(level + 1)
+        current_length = self.min_layer_length
+        for level in range(self.level_count, 0, -1):
+            offset = current_length / 4
             gaussians_level_start = torch.floor((gaussians_start + offset) / current_length).to(torch.int64).squeeze(-1)
             gaussians_level_end = torch.floor((gaussians_end + offset) / current_length).to(torch.int64).squeeze(-1)
-            segment_count = 1 if level == 0 else (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+            segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
             active_mask = mask & (gaussians_level_start == gaussians_level_end)
-            replace_ind = 0 if level == 0 else math.floor((gaussians.current_timestamp + offset) / current_length)
+            replace_ind = math.floor((gaussians.current_timestamp + offset) / current_length)
             #segments_for_update = torch.unique(gaussians_level_start[active_mask], sorted = False)
             #replace_flag = False
             for ind in range(segment_count):
@@ -260,6 +260,9 @@ class TemperalGaussianHierarchy():
                     self.layers[level][ind].append_from_gaussians_gpu(actual_mask, gaussians, new_gaussians)
             
             mask = mask & (gaussians_level_start != gaussians_level_end)
+            current_length = current_length * 2
+            
+        self.layers[0][0].clone_by_mask(mask, gaussians, opt, new_gaussians)
 
     def put_current_related_gaussians(self, timestamp : float, gaussians : "GaussianModel"):
         gaussians.set_current_timestamp(timestamp)
@@ -267,9 +270,10 @@ class TemperalGaussianHierarchy():
         #state_dict = self.layers[0][0].clone_to(gaussians)
         gaussians_segments = [self.layers[0][0]]
         for level in range(1, self.level_count + 1):
-            offset = self.max_layer_length / 2**(level + 1)
-            current_ind = math.floor((timestamp + offset) / (self.max_layer_length / 2**(level - 1)))
+            offset = self.layer_segment_len[level] / 4
+            current_ind = math.floor((timestamp + offset) / self.layer_segment_len[level])
             gaussians_segments.append(self.layers[level][current_ind])
+            # print(self.layers[level][current_ind]._velocity.shape)
             #gaussians.append_from_gaussians_cpu(self.layers[level][current_ind])
         gaussians.clone_from_cpu(gaussians_segments)
         gaussians.reset_param_groups()
@@ -278,12 +282,14 @@ class TemperalGaussianHierarchy():
         # for level in range(1, self.level_count + 1):
         #     current_ind = math.floor(timestamp / (self.max_layer_length / 2**(level - 1)))
         #     gaussians.append_state_from_gaussian_cpu(self.layers[level][current_ind], None)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     def capture(self, gaussians : GaussianModel, opt):
         new_gaussians = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
+        (model_params, first_iter) = torch.load('./chkpnt_best_pgsr.pth')
+        new_gaussians.restore(model_params, opt)
         #self.update_from_gaussians(gaussians, opt, new_gaussians)
-        self.update_to_gaussians(gaussians, opt, new_gaussians)
+        # self.update_to_gaussians(gaussians, opt, new_gaussians)
         # active_sh_degree = gaussians.active_sh_degree
         # _xyz = self.layers[0][0]._xyz
         # _features_dc = self.layers[0][0]._features_dc
@@ -307,44 +313,18 @@ class TemperalGaussianHierarchy():
         else:
             env_map = None
         # active_sh_degree_t = gaussians.active_sh_degree_t
-        # for level in range(1, self.level_count + 1):
-        #     current_length = self.max_layer_length / 2**(level - 1)
-        #     for ind in range(math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)):
-        #             _xyz = torch.cat([_xyz, self.layers[level][ind]._xyz])
-        #             _features_dc = torch.cat([_features_dc, self.layers[level][ind]._features_dc])
-        #             _features_rest = torch.cat([_features_rest, self.layers[level][ind]._features_rest])
-        #             _scaling = torch.cat([_scaling, self.layers[level][ind]._scaling])
-        #             _rotation = torch.cat([_rotation, self.layers[level][ind]._rotation])
-        #             _opacity = torch.cat([_opacity, self.layers[level][ind]._opacity])
-        #             max_radii2D = torch.cat([max_radii2D, self.layers[level][ind].max_radii2D])
-        #             xyz_gradient_accum = torch.cat([xyz_gradient_accum, self.layers[level][ind].xyz_gradient_accum])
-        #             t_gradient_accum = torch.cat([t_gradient_accum, self.layers[level][ind].t_gradient_accum])
-        #             denom = torch.cat([denom, self.layers[level][ind].denom])
-        #             opt_states.update(self.layers[level][ind].opt_states)
-        #             _t = torch.cat([_t, self.layers[level][ind]._t])
-        #             _scaling_t = torch.cat([_scaling_t, self.layers[level][ind]._scaling_t])
-        #             _rotation_r = torch.cat([_rotation_r, self.layers[level][ind]._rotation_r])
-        return (
-                gaussians.active_sh_degree,
-                new_gaussians._xyz,
-                new_gaussians._features_dc,
-                new_gaussians._features_rest,
-                new_gaussians._scaling,
-                new_gaussians._rotation,
-                new_gaussians._opacity,
-                new_gaussians.max_radii2D,
-                new_gaussians.xyz_gradient_accum,
-                new_gaussians.t_gradient_accum,
-                new_gaussians.denom,
-                new_gaussians.opt_states,
-                gaussians.spatial_lr_scale,
-                new_gaussians._t,
-                new_gaussians._scaling_t,
-                new_gaussians._rotation_r,
-                gaussians.rot_4d,
-                env_map,
-                gaussians.active_sh_degree_t
-            )
+        # current_length = self.min_layer_length
+        state_dict = new_gaussians.get_state_dict()
+        gaussians_segments = []
+        for level in range(0, self.level_count + 1):
+            for ind in range(self.layer_segment_cnt[level]):
+                gaussians_segments.append(self.layers[level][ind])
+        new_gaussians.clone_from_cpu(gaussians_segments)
+        new_gaussians.reset_param_groups()
+        new_gaussians.clone_state_from_gaussians_cpu(gaussians_segments, state_dict)
+        # new_gaussians.clone_opt_states_from_gaussians_cpu(gaussians_segments)
+                
+        return new_gaussians.capture()
     
     # def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
     #     self.spatial_lr_scale = spatial_lr_scale

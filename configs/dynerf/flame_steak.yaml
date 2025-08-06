@@ -3,13 +3,13 @@ time_duration: [0.0, 10.0]
 num_pts: 1000_000
 num_pts_ratio: 1.0
 rot_4d: True
-force_sh_3d: False
+force_sh_3d: True
 batch_size: 1
 exhaust_test: True
 
 ModelParams:
-  sh_degree: 3
-  source_path: "data/N3V/flame_steak"
+  sh_degree: 0
+  source_path: "/media/bbnc/ssd/4d-gaussian-splatting/data/N3V/flame_steak"
   model_path: "output/N3V/flame_steak"
   images: "images"
   resolution: 2

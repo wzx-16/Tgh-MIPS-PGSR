@@ -40,6 +40,14 @@ class Camera:
         self.gt_alpha_mask = gt_alpha_mask
         self.meta_only = meta_only
         
+        self.intr = torch.tensor([[fl_x, 0, cx],
+                               [0, fl_y, cy],
+                               [0, 0, 1]], dtype=torch.float32)
+        
+        self.extr = torch.eye(4, dtype=torch.float32)
+        self.extr[:3, :3] = torch.tensor(R.transpose(), dtype=torch.float32)
+        self.extr[:3, 3] = torch.tensor(T, dtype=torch.float32)
+        
         try:
             self.data_device = torch.device(data_device)
         except Exception as e:

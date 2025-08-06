@@ -51,6 +51,9 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, num_pts=num_pts, time_duration=time_duration, extension=args.extension, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader, render=render_only)
+        elif os.path.exists(os.path.join(args.source_path, "calibration_full.json")):
+            print("Found calibration_full.json file, assuming THU data set!")
+            scene_info = sceneLoadTypeCallbacks["THU"](args.source_path, args.white_background, num_pts=num_pts, time_duration=time_duration, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -69,9 +72,9 @@ class Scene:
             with open(os.path.join(self.model_path, "cameras.json"), 'w') as file:
                 json.dump(json_cams, file)
 
-        if shuffle:
-            random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
-            random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
+        # if shuffle:
+        #     random.shuffle(scene_info.train_cameras)  # Multi-res consistent random shuffling
+        #     random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
@@ -91,11 +94,12 @@ class Scene:
                                                             "iteration_" + str(self.loaded_iter),
                                                             "point_cloud.ply"))
             else:
-                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+                # self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+                self.gaussians.create_from_multi_pcd(args.source_path, tgh, self.cameras_extent, tgh.time_duration)
                 #self.tgh.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration, opt, tgh):
-        torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt" + str(iteration) + ".pth")
+        # torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt" + str(iteration) + ".pth")
         torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh_chkpnt" + str(iteration) + ".pth")
 
     def getTrainCameras(self, scale=1.0):

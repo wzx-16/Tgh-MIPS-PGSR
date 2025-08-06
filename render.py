@@ -14,7 +14,7 @@ from scene import Scene
 import os
 from tqdm import tqdm
 from os import makedirs
-from gaussian_renderer import render
+from gaussian_renderer import render, render_3d_pgsr_anti
 import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
@@ -29,7 +29,16 @@ def render_set(model_path, name, iteration, views, gaussians, pipeline, backgrou
     makedirs(gts_path, exist_ok=True)
 
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
-        rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
+        #rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
+        viewpoint_cam = view[1].cuda()
+        #timestamp = viewpoint_cam.timestamp
+        xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
+        mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+        opacity = gaussians.get_opacity * mt
+        shs = gaussians.get_features
+        ma = (mt > 0.05).squeeze()
+        rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
+                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         gt = view[0][0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))

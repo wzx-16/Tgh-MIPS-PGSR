@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
-from pointops2.functions.pointops import furthestsampling, knnquery
+# from pointops2.functions.pointops import furthestsampling, knnquery
 
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
