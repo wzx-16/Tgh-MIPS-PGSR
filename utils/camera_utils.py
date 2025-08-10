@@ -13,6 +13,9 @@ from scene.cameras import Camera
 import numpy as np
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal
+import os
+from PIL import Image
+import torch
 
 WARNED = False
 
@@ -49,10 +52,23 @@ def loadCam(args, id, cam_info, resolution_scale):
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
         gt_image = resized_image_rgb[:3, ...]
 
+        # mask_path = os.path.join(cam_info.image_path, os.path.joint("../mattings", cam_info.image_name.split("_")[0]))
+        # mask_name = cam_info.image_name.split("_")[-1].split(".")[0] + ".png"
+        # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
+        #     loaded_mask_PIL = image_load.resize((int(orig_w / 2), int(orig_h / 2)))
+        # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)) / 255.0
+        # loaded_mask = loaded_mask.permute(2, 0, 1)
         if resized_image_rgb.shape[0] == 4:
             loaded_mask = resized_image_rgb[3:4, ...]
     else:
         gt_image = cam_info.image
+        #loaded_mask = cam_info.loaded_mask
+        # mask_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("mattings", cam_info.image_name.split("_")[0]))
+        # mask_name = cam_info.image_name.split("_")[-1].split(".")[0] + ".png"
+        # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
+        #     loaded_mask_PIL = image_load.resize((int(orig_w), int(orig_h)))
+        # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)) / 255.0
+        #loaded_mask = loaded_mask.permute(2, 0, 1)
     
     if cam_info.depth is not None:
         depth = PILtoTorch(cam_info.depth, resolution) * 255 / 10000

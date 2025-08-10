@@ -264,9 +264,10 @@ class TemperalGaussianHierarchy():
             
         self.layers[0][0].clone_by_mask(mask, gaussians, opt, new_gaussians)
 
-    def put_current_related_gaussians(self, timestamp : float, gaussians : "GaussianModel"):
+    def put_current_related_gaussians(self, timestamp : float, gaussians : "GaussianModel", render_only = False):
         gaussians.set_current_timestamp(timestamp)
-        state_dict = gaussians.get_state_dict()
+        if not render_only:
+            state_dict = gaussians.get_state_dict()
         #state_dict = self.layers[0][0].clone_to(gaussians)
         gaussians_segments = [self.layers[0][0]]
         for level in range(1, self.level_count + 1):
@@ -276,18 +277,83 @@ class TemperalGaussianHierarchy():
             # print(self.layers[level][current_ind]._velocity.shape)
             #gaussians.append_from_gaussians_cpu(self.layers[level][current_ind])
         gaussians.clone_from_cpu(gaussians_segments)
-        gaussians.reset_param_groups()
-        gaussians.clone_state_from_gaussians_cpu(gaussians_segments, state_dict)
+        if not render_only:
+            gaussians.reset_param_groups()
+            gaussians.clone_state_from_gaussians_cpu(gaussians_segments, state_dict)
         # gaussians.append_state_from_gaussian_cpu(self.layers[0][0], state_dict)
         # for level in range(1, self.level_count + 1):
         #     current_ind = math.floor(timestamp / (self.max_layer_length / 2**(level - 1)))
         #     gaussians.append_state_from_gaussian_cpu(self.layers[level][current_ind], None)
         # torch.cuda.empty_cache()
 
+    def restore(self, model_args, training_args):
+        (active_sh_degree,
+            spatial_lr_scale,
+            env_map,
+            active_sh_degree_t,
+            save_layers,
+            self.sh_degree,
+            self.gaussian_dim,
+            self.rot_4d,
+            self.force_sh_3d,
+            self.sh_degree_t,
+            self.level_count,
+            self.max_layer_length,
+            self.time_duration) = model_args
+        self.fill_layers(save_layers)
+        return (active_sh_degree, spatial_lr_scale, env_map, active_sh_degree_t)
+    
+    def fill_layers(self, save_layers):
+        self.create_layer_from_tuple(self.layers[0][0], save_layers[0][0])
+        for level in range(1, self.level_count + 1):
+            current_layer_length = self.max_layer_length / 2**(level - 1)
+            segment_count = math.ceil((self.time_duration[1] - self.time_duration[0]) / current_layer_length) + 1
+            for ind in range(segment_count):
+                self.create_layer_from_tuple(self.layers[level][ind], save_layers[level][ind])
+
+    def create_layer_from_tuple(self, gaussians: GaussianModel, t):
+        (gaussians._xyz,
+            gaussians._features_dc,
+            gaussians._features_rest,
+            gaussians._scaling,
+            gaussians._rotation,
+            gaussians._opacity,
+            gaussians.max_radii2D,
+            gaussians.xyz_gradient_accum,
+            gaussians.xyz_gradient_accum_abs,
+            gaussians.t_gradient_accum,
+            gaussians.denom,
+            gaussians.opt_states,
+            gaussians._t,
+            gaussians._scaling_t,
+            gaussians._velocity) = t
+
     def capture(self, gaussians : GaussianModel, opt):
-        new_gaussians = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
-        (model_params, first_iter) = torch.load('./chkpnt_best_pgsr.pth')
-        new_gaussians.restore(model_params, opt)
+        # static_layer = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
+        # save_layers = [[static_layer]]
+        # for level in range(1, self.level_count + 1):
+        #     current_layer_length = self.max_layer_length / 2**(level - 1)
+        #     current_layer = []
+        #     # offset may need one more
+        #     segment_count = math.ceil((self.time_duration[1] - self.time_duration[0]) / current_layer_length) + 1
+        #     for ind in range(segment_count):
+        #         segment = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
+        #         current_layer.append(segment)
+
+        #     save_layers.append(current_layer)
+        #self.update_from_gaussians(gaussians, opt, new_gaussians)
+        #self.update_to_gaussians(gaussians, opt, new_gaussians)
+        #self.update_to_tgh_layer(gaussians, opt, save_layers)
+        save_layers_tupe = []
+        for layer in self.layers:
+            current_layer = []
+            for segment in layer:
+                segment_tuple = self.convert_gaussians_to_tuple(segment)
+                current_layer.append(segment_tuple)
+            save_layers_tupe.append(current_layer)
+        # new_gaussians = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
+        #(model_params, first_iter) = torch.load('./chkpnt_best_pgsr.pth')
+        #new_gaussians.restore(model_params, opt)
         #self.update_from_gaussians(gaussians, opt, new_gaussians)
         # self.update_to_gaussians(gaussians, opt, new_gaussians)
         # active_sh_degree = gaussians.active_sh_degree
@@ -314,17 +380,51 @@ class TemperalGaussianHierarchy():
             env_map = None
         # active_sh_degree_t = gaussians.active_sh_degree_t
         # current_length = self.min_layer_length
-        state_dict = new_gaussians.get_state_dict()
-        gaussians_segments = []
-        for level in range(0, self.level_count + 1):
-            for ind in range(self.layer_segment_cnt[level]):
-                gaussians_segments.append(self.layers[level][ind])
-        new_gaussians.clone_from_cpu(gaussians_segments)
-        new_gaussians.reset_param_groups()
-        new_gaussians.clone_state_from_gaussians_cpu(gaussians_segments, state_dict)
+        # state_dict = new_gaussians.get_state_dict()
+        # gaussians_segments = []
+        # for level in range(0, self.level_count + 1):
+        #     for ind in range(self.layer_segment_cnt[level]):
+        #         gaussians_segments.append(self.layers[level][ind])
+        # new_gaussians.clone_from_cpu(gaussians_segments)
+        # new_gaussians.reset_param_groups()
+        # new_gaussians.clone_state_from_gaussians_cpu(gaussians_segments, state_dict)
         # new_gaussians.clone_opt_states_from_gaussians_cpu(gaussians_segments)
                 
-        return new_gaussians.capture()
+        return (
+                gaussians.active_sh_degree,
+                gaussians.spatial_lr_scale,
+                env_map,
+                gaussians.active_sh_degree_t,
+                save_layers_tupe,
+                self.sh_degree,
+                self.gaussian_dim,
+                gaussians.rot_4d,
+                self.force_sh_3d,
+                self.sh_degree_t,
+                self.level_count,
+                self.max_layer_length,
+                self.time_duration
+            )
+    
+    def convert_gaussians_to_tuple(self, gaussians : GaussianModel):
+        return (
+            gaussians._xyz,
+            gaussians._features_dc,
+            gaussians._features_rest,
+            gaussians._scaling,
+            gaussians._rotation,
+            gaussians._opacity,
+            gaussians.max_radii2D,
+            gaussians.xyz_gradient_accum,
+            gaussians.xyz_gradient_accum_abs,
+            gaussians.t_gradient_accum,
+            gaussians.denom,
+            gaussians.opt_states,
+            gaussians._t,
+            gaussians._scaling_t,
+            gaussians._velocity
+            #gaussians._rotation_r
+        )
     
     # def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
     #     self.spatial_lr_scale = spatial_lr_scale

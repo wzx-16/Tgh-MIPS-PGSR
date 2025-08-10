@@ -32,6 +32,9 @@ from torch.utils.data import DataLoader
 import cv2
 # import copy_and_cat_engine
 import lpips
+import gc
+from datetime import datetime
+from PIL import Image
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -51,7 +54,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
     scene = Scene(dataset, gaussians, tgh, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     
-    checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
+    #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
     
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -61,7 +64,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     else:
         gaussian_init_flag = False
         gaussians.training_setup(opt)
-
+    #print("test5")
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
@@ -91,9 +94,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # gaussian_init_flag = False
     training_dataset = scene.getTrainCameras()
     training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=0 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
-     
+    #print("test6")
     iteration = first_iter
     fn_lpips = lpips.LPIPS(net='vgg').cuda()
+    #print("test7")
     while iteration < opt.iterations + 1:
         for batch_data in training_dataloader:
             iteration += 1
@@ -117,7 +121,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             #start_t = time.time()
             for batch_idx in range(batch_size):
-                gt_image, viewpoint_cam, n_gt = batch_data[batch_idx]
+                gt_image, loaded_mask, viewpoint_cam, n_gt = batch_data[batch_idx]
                 #gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 if gaussian_init_flag:
                     #cpu_to_cuda_start = time.time()
@@ -129,6 +133,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
+                loaded_mask = loaded_mask.cuda()
                 #render_start = time.time()
                 # copy_and_cat_engine.waitGroupCompletion(0, 0)
                 # render_pkg = render(viewpoint_cam, gaussians, pipe, background)
@@ -154,7 +159,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # plt.hist(opacity[ma].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 background = 0*torch.rand(3, device="cuda")
-                
+                # print("gaussiansize")
+                # print(xyz.size())
+                # print(opacity.size())
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
                                     gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -162,7 +169,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 
                 
                 if iteration%100==1:
-                    cv2.imwrite("./test/debug_render_{}.jpg".format(viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    cv2.imwrite("./test/debug_render_{}.jpg".format(viewpoint_cam.image_name + "_" + timestamp), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
                 
                 #loss_start = time.time()
                 # Loss
@@ -173,22 +181,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # random_v = torch.randint(0, gt_image.shape[-2] - patch_size, (1,))
                 # random_u = torch.randint(0, gt_image.shape[-1] - patch_size, (1,))
                 # lp = fn_lpips(image[None, :, random_v:random_v+patch_size, random_u:random_u+patch_size], gt_image[None, :, random_v:random_v+patch_size, random_u:random_u+patch_size], normalize=True)
-                
+                # print("test8")
+                # torch.cuda.empty_cache()
+                # gc.collect()
                 lp = fn_lpips(image[None], gt_image[None], normalize=True)
-                
+                #print("test9")
                 # gt_image_resize = torch.nn.functional.interpolate(gt_image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # image_resize = torch.nn.functional.interpolate(image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # lp_resize = fn_lpips(image_resize, gt_image_resize, normalize=True)
                 loss = loss + 0.01 * lp.mean()
+                #print("test10")
                 # loss = loss + 0.01 * lp.mean() + 0.01 * lp_resize.mean()
                 alpha = render_pkg["alpha"]
+                #print("test11")
                 # ###### opa mask Loss ######
                 if opt.lambda_opa_mask > 0:
                     o = alpha.clamp(1e-6, 1-1e-6)
-                    # sky = 1 - viewpoint_cam.gt_alpha_mask
-                    sky = torch.ones_like(gt_image[:1])
-                    sky[torch.linalg.norm(gt_image, dim=0, keepdim=True)>0] = 0.0
-                    sky[torch.linalg.norm(gt_image, dim=0, keepdim=True)==0] = 1.0
+                    # mask_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("mattings", viewpoint_cam.image_name.split("_")[0]))
+                    # mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+                    # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
+                    #     loaded_mask_PIL = image_load.resize((1500, 2000))
+                    # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)).unsqueeze(0).cuda() / 255.0
+                    #sky = 1 - viewpoint_cam.gt_alpha_mask
+                    sky = 1 - loaded_mask
+                    # sky = torch.ones_like(gt_image[:1])
+                    # sky[torch.linalg.norm(gt_image, dim=0, keepdim=True)>0] = 0.0
+                    # sky[torch.linalg.norm(gt_image, dim=0, keepdim=True)==0] = 1.0
 
                     Lopa_mask = (- sky * torch.log(1 - o)).mean()
 
@@ -541,7 +559,7 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(5000,args.iterations + 1,5000)]
+    args.save_iterations = args.save_iterations + [i for i in range(500,args.iterations + 1,5000)]
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)

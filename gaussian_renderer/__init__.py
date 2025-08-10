@@ -425,7 +425,7 @@ def render_3d_pgsr_anti(
     # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
     # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
     # camera_center = torch.linalg.inv(extr)[:3, 3]
-
+    #print(viewpoint_camera.extr, "test")
     raster_settings = PlaneGaussianRasterizationSettings(
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
@@ -442,7 +442,7 @@ def render_3d_pgsr_anti(
             render_geo=True,
             debug=False
         )
-
+    #print(viewpoint_camera.extr, "1")
     rasterizer = PlaneGaussianRasterizer(raster_settings = raster_settings)
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
@@ -498,7 +498,9 @@ def render_3d_pgsr_anti(
 
     # print(local_distance.min().data, local_distance.mean().data, local_distance.max().data, 'ddd')
     # print(torch.linalg.norm(input_all_map[:, :3], dim=-1).min(), torch.linalg.norm(input_all_map[:, :3], dim=-1).max(), 'ooo')
-
+    # torch.cuda.synchronize()
+    # print(viewpoint_camera.extr, "2")
+    # extr_before = viewpoint_camera.extr.clone()
     rendered_image, radii, out_observe, out_all_map, plane_depth = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -511,12 +513,21 @@ def render_3d_pgsr_anti(
         all_map = input_all_map,
         # cov3D_precomp = cov3D_precomp
         )
+    # torch.cuda.synchronize()
+    # print(viewpoint_camera.extr, "3")
+    # print("extr id:", id(viewpoint_camera.extr))
+    # print("Has extr changed?", not torch.allclose(viewpoint_camera.extr, extr_before))
+    # print("extr after:\n", viewpoint_camera.extr)
 
     # ray = means3D - viewpoint_camera.camera_center.repeat(means3D.shape[0], 1)
     # ray = ray / ray[..., 2:3]
     # print(input_all_map[(input_all_map[:, 4] / -(input_all_map[:, 0] * ray[:, 0] + input_all_map[:, 1] * ray[:, 1] + input_all_map[:, 2] + 1.0e-8))<-1100], 'ppp')
 
     if mask is not None:
+        # print(mask.shape)
+        # print(radii.shape)
+        #torch.cuda.synchronize()
+
         radii_all = radii.new_zeros(mask.shape)
         radii_all[mask] = radii
         radii = radii_all
@@ -568,6 +579,7 @@ def render_3d_pgsr_anti(
 
     # depth_normal = est_normal[0]
     # # print(depth_normal.mean())
+    #print(viewpoint_camera.extr)
     depth_normal = render_normal(viewpoint_camera.intr, torch.linalg.inv(viewpoint_camera.extr), plane_depth.squeeze()) * (rendered_alpha).detach()
     return_dict.update({"depth_normal": depth_normal})
     

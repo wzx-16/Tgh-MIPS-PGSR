@@ -251,10 +251,10 @@ if __name__ == '__main__':
     test_frames = []
     for i in range(N):
         cam_frames = [{'file_path': im.lstrip("/").split('.')[0], 
-                       'fl_x': Ks[i][0, 0] / 5,
-                       'fl_y': Ks[i][1, 1] / 5,
-                       'cx': Ks[i][0, 2] / 5,
-                       'cy': Ks[i][1, 2] / 5,
+                       'fl_x': Ks[i][0, 0] / 2,
+                       'fl_y': Ks[i][1, 1] / 2,
+                       'cx': Ks[i][0, 2] / 2,
+                       'cy': Ks[i][1, 2] / 2,
                        'transform_matrix': poses[i].tolist(),
                        'time': int(im.lstrip("/").split('.')[0][-4:]) / 30.} for im in images if cams[i] == im[7:10]]
         if i == 0:
@@ -263,21 +263,21 @@ if __name__ == '__main__':
             train_frames += cam_frames
 
     train_transforms = {
-        'w': W // 5,
-        'h': H // 5,
-        'fl_x': Ks[0][0,0] / 5,
-        'fl_y': Ks[0][1,1] / 5,
-        'cx': Ks[0][0,2] / 5,
-        'cy': Ks[0][1,2] / 5,
+        'w': W // 2,
+        'h': H // 2,
+        'fl_x': Ks[0][0,0] / 2,
+        'fl_y': Ks[0][1,1] / 2,
+        'cx': Ks[0][0,2] / 2,
+        'cy': Ks[0][1,2] / 2,
         'frames': train_frames,
     }
     test_transforms = {
-        'w': W // 5,
-        'h': H // 5,
-        'fl_x': Ks[0][0,0] / 5,
-        'fl_y': Ks[0][1,1] / 5,
-        'cx': Ks[0][0,2] / 5,
-        'cy': Ks[0][1,2] / 5,
+        'w': W // 2,
+        'h': H // 2,
+        'fl_x': Ks[0][0,0] / 2,
+        'fl_y': Ks[0][1,1] / 2,
+        'cx': Ks[0][0,2] / 2,
+        'cy': Ks[0][1,2] / 2,
         'frames': test_frames,
     }
 

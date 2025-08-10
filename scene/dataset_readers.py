@@ -277,7 +277,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
         image_path = os.path.join(path, cam_name) # .replace('hdImgs_unditorted', 'hdImgs_unditorted_rgba').replace('.jpg', '.png')
         image_name = Path(cam_name).stem
-        
+        #loaded_mask = None
         if not dataloader:
             with Image.open(image_path) as image_load:
                 im_data = np.array(image_load.convert("RGBA"))
@@ -293,6 +293,11 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
                 image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
 
             width, height = image.size[0], image.size[1]
+            # mask_path = "/" + os.path.join(os.path.join(*image_path.split("/")[0:-2]), os.path.join("mattings", image_name.split("_")[0]))
+            # mask_name = image_name.split("_")[-1].split(".")[0] + ".png"
+            # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
+            #     loaded_mask_PIL = image_load.resize((width, height))
+            # loaded_mask = np.array(loaded_mask_PIL)
         else:
             image = np.empty(0)
             width, height = imagesize.get(image_path)
