@@ -27,11 +27,19 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
-
+    timestamp_first = 0
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         #rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
         viewpoint_cam = view[2].cuda()
-        timestamp = view[2].timestamp
+        #viewpoint_cam.timestamp += 1/60
+        timestamp = viewpoint_cam.timestamp
+        # if timestamp_first < 0:
+        #     timestamp_first +=1
+        # if timestamp_first == 0:
+        #     timestamp_first = timestamp
+        print(timestamp)
+        print(timestamp_first)
+        print(viewpoint_cam.image_height, viewpoint_cam.image_width)
         tgh.put_current_related_gaussians(timestamp, gaussians, True)
         #timestamp = viewpoint_cam.timestamp
         xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
@@ -39,8 +47,14 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         opacity = gaussians.get_opacity * mt
         shs = gaussians.get_features
         ma = (mt > 0.05).squeeze()
-        rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, 1, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
+        print("active sh", gaussians.active_sh_degree)
+        render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
+                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+        #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
+        #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
+        rendering = render_package["render"]
+        depth_normal = render_package["depth_normal"]
+        rendered_normal = render_package["rendered_normal"]
         gt = view[0][0:3, :, :]
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))

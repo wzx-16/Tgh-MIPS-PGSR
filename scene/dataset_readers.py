@@ -292,7 +292,9 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             else:
                 image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
 
-            width, height = image.size[0], image.size[1]
+            #width, height = image.size[0], image.size[1]
+            width = contents["w"]
+            height = contents["h"]
             # mask_path = "/" + os.path.join(os.path.join(*image_path.split("/")[0:-2]), os.path.join("mattings", image_name.split("_")[0]))
             # mask_name = image_name.split("_")[-1].split(".")[0] + ".png"
             # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
@@ -300,7 +302,9 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             # loaded_mask = np.array(loaded_mask_PIL)
         else:
             image = np.empty(0)
-            width, height = imagesize.get(image_path)
+            #width, height = imagesize.get(image_path)
+            width = contents["w"]
+            height = contents["h"]
         
         if 'depth_path' in frame:
             depth_name = frame["depth_path"]

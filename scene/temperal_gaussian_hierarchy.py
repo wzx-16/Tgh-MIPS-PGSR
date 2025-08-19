@@ -72,6 +72,7 @@ class TemperalGaussianHierarchy():
         self.layers[0][0].append_from_gaussians_gpu(mask, gaussians, None)
         
     def update_from_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
+        #update_start = time.time()
         # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
         mean_t, cov_t = gaussians.get_t, gaussians.get_sigma_t
         effect_range = torch.sqrt(-2 * torch.log(torch.tensor(o_th, device="cuda")) * cov_t)
@@ -169,6 +170,10 @@ class TemperalGaussianHierarchy():
             current_length = current_length * 2
             
         self.layers[0][0].clone_by_mask(mask, gaussians, opt, new_gaussians)
+        # torch.cuda.synchronize()
+        # update_end = time.time()
+        # print(f"update_time:{update_end - update_start:.6f} seconds")
+
 
     def update_to_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
         # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()

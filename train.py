@@ -35,6 +35,7 @@ import lpips
 import gc
 from datetime import datetime
 from PIL import Image
+import time
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -45,9 +46,22 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size):
     
+    # import os, torch, torch.nn as nn
+    # print("torch:", torch.__version__, "cuda:", torch.version.cuda, "cudnn:", torch.backends.cudnn.version())
+    # print("cuda_available:", torch.cuda.is_available(), "cudnn_available:", torch.backends.cudnn.is_available())
+    # print("device_count:", torch.cuda.device_count(), "name:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU")
+
+    # # Sanity conv on your GPU
+    # if torch.cuda.is_available():
+    #     x = torch.randn(2, 3, 224, 224, device="cuda", dtype=torch.float32)
+    #     m = nn.Conv2d(3, 16, 3, padding=1).cuda().float()
+    #     y = m(x)
+    #     print("sanity conv OK:", y.shape)
+    #torch.autograd.set_detect_anomaly(True)
+
     if dataset.frame_ratio > 1:
         time_duration = [time_duration[0] / dataset.frame_ratio,  time_duration[1] / dataset.frame_ratio]
-    device = "cpu" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     first_iter = 0
     # tb_writer = prepare_output_and_logger(dataset)
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
@@ -96,10 +110,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=0 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
     #print("test6")
     iteration = first_iter
-    fn_lpips = lpips.LPIPS(net='vgg').cuda()
+    fn_lpips = lpips.LPIPS(net='alex').cuda().eval()
+    # def lpips_tiled(im_chw, gt_chw, tile=512, overlap=64):
+    #     im = im_chw.to('cuda', dtype=torch.float32)
+    #     gt = gt_chw.to('cuda', dtype=torch.float32).detach()
+    #     _,_,H,W = im.shape
+    #     step = tile - overlap
+    #     total = 0.0
+    #     area  = 0
+    #     for y in range(0, H, step):
+    #         for x in range(0, W, step):
+    #             y1, x1 = min(y+tile, H), min(x+tile, W)
+    #             d = fn_lpips(im[..., y:y1, x:x1], gt[..., y:y1, x:x1], normalize=True)
+    #             a = (y1-y)*(x1-x)
+    #             total += d*a
+    #             area += a
+    #     return total/area
     #print("test7")
     while iteration < opt.iterations + 1:
         for batch_data in training_dataloader:
+            #train_start = time.time()
             iteration += 1
             # if iteration > 20:
             #     exit()
@@ -125,12 +155,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 if gaussian_init_flag:
                     #cpu_to_cuda_start = time.time()
+                    #put_gaussians_start = time.time()
                     scene.tgh.put_current_related_gaussians(viewpoint_cam.timestamp, gaussians)
+                    # put_gaussians_end = time.time()
+                    # torch.cuda.synchronize()
+                    # print(f"put gaussians time{put_gaussians_end - put_gaussians_start:.6f}second")
                     #torch.cuda.synchronize()
                     #cpu_to_cuda_end = time.time()
                     #print(f" cpu to cuda time: {cpu_to_cuda_end - cpu_to_cuda_start:.6f} seconds")
                 else:
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
+                #render_start = time.time()
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
                 loaded_mask = loaded_mask.cuda()
@@ -167,7 +202,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
                 
-                
+                # render_end = time.time()
+                # torch.cuda.synchronize()
+                # print(f"render time {render_end - render_start:.6f} second")
                 if iteration%100==1:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     cv2.imwrite("./test/debug_render_{}.jpg".format(viewpoint_cam.image_name + "_" + timestamp), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
@@ -184,7 +221,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print("test8")
                 # torch.cuda.empty_cache()
                 # gc.collect()
+                #print("image", image.shape, image.dtype, image.device, "gt", gt_image.shape)
                 lp = fn_lpips(image[None], gt_image[None], normalize=True)
+                #lp = lpips_tiled(image[None], gt_image[None])
                 #print("test9")
                 # gt_image_resize = torch.nn.functional.interpolate(gt_image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # image_resize = torch.nn.functional.interpolate(image[None], size=(1960//2, 3640//2), mode='bilinear')
@@ -201,8 +240,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
                     # with Image.open(os.path.join(mask_path, mask_name)) as image_load:
                     #     loaded_mask_PIL = image_load.resize((1500, 2000))
-                    # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)).unsqueeze(0).cuda() / 255.0
+                    #loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)).unsqueeze(0).cuda() / 255.0
                     #sky = 1 - viewpoint_cam.gt_alpha_mask
+                    # print(o.shape)
+                    # print(loaded_mask.shape)
                     sky = 1 - loaded_mask
                     # sky = torch.ones_like(gt_image[:1])
                     # sky[torch.linalg.norm(gt_image, dim=0, keepdim=True)>0] = 0.0
@@ -307,9 +348,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
-                #loss_end = time.time()
-                #torch.cuda.synchronize()
-                #print(f"loss compute time: {loss_end - loss_start:.6f} seconds")
+                # loss_end = time.time()
+                # torch.cuda.synchronize()
+                # print(f"loss compute time: {loss_end - loss_start:.6f} seconds")
                 #scene.tgh.update_from_gaussians(gaussians, opt)
 
             if batch_size > 1:
@@ -418,6 +459,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             #torch.cuda.synchronize()
             #end_t = time.time()
             #print(f"total iter time: {end_t - start_t:.6f} seconds")
+            # torch.cuda.synchronize()
+            # train_end = time.time()
+            # print(f"train time:{train_end - train_start:.6f} seconds")
+
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -559,7 +604,7 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(500,args.iterations + 1,5000)]
+    args.save_iterations = args.save_iterations + [i for i in range(2000,args.iterations + 1,3000)]
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)

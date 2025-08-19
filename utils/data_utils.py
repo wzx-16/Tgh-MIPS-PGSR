@@ -31,14 +31,17 @@ class CameraDataset(Dataset):
             if resized_image_rgb.shape[1] == 4:
                 gt_alpha_mask = resized_image_rgb[3:4, ...]
                 viewpoint_image *= gt_alpha_mask
-            else:
-                viewpoint_image *= torch.ones((1, viewpoint_cam.image_height, viewpoint_cam.image_width))
+            #else:
+                #viewpoint_image *= torch.ones((1, viewpoint_cam.image_height, viewpoint_cam.image_width))
                 
             mask_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("mattings", viewpoint_cam.image_name.split("_")[0]))
             mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
             with Image.open(os.path.join(mask_path, mask_name)) as image_load:
-                loaded_mask_PIL = image_load.resize((1500, 2000))
+                #loaded_mask_PIL = image_load.resize((1500, 2000))
+                loaded_mask_PIL = image_load.convert("L")
             loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)).unsqueeze(0) / 255.0
+            #loaded_mask = None
+
             # pals = os.path.split(viewpoint_cam.image_path)
             # pa = '/media/bbnc/Elements/test/normal/' + pals[-1][3:7] + '/' + pals[-1].replace('jpg', 'png')
             # # pa_mask = '/media/bbnc/Elements/test/human_masks/' + pals[-1][3:7] + '/' + pals[-1].replace('jpg', 'png')
