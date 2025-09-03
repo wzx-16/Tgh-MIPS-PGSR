@@ -44,9 +44,9 @@ OptimizationParams:
   rotation_lr: 0.001
   percent_dense: 0.01
   lambda_dssim: 0.2
-  thresh_opa_prune: 0.01
+  thresh_opa_prune: 0.005
   densification_interval: 100
-  opacity_reset_interval: 10000
+  opacity_reset_interval: 3000
   densify_from_iter: 500
   densify_until_iter: 15_000
   densify_grad_threshold: 0.0001
@@ -54,6 +54,6 @@ OptimizationParams:
   densify_until_num_points: -1
   final_prune_from_iter: -1
   sh_increase_interval: 1000
-  lambda_opa_mask: 0.1
+  lambda_opa_mask: 0.2
   lambda_rigid: 0.0
   lambda_motion: 0.0

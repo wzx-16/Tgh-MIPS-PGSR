@@ -174,6 +174,16 @@ class TemperalGaussianHierarchy():
         # update_end = time.time()
         # print(f"update_time:{update_end - update_start:.6f} seconds")
 
+    def reset_opacity(self):
+        current_length = self.min_layer_length
+        for level in range(self.level_count, 0, -1):
+            segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+            for ind in range(segment_count):
+                self.layers[level][ind].reset_opacity_cpu()
+
+            current_length = current_length * 2
+            
+        self.layers[0][0].reset_opacity_cpu()
 
     def update_to_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
         # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()

@@ -52,7 +52,8 @@ if __name__ == '__main__':
         
     # load data
     images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(args.path, "images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
-    images = [im for im in images if int(im[11:17]) < 42 and int(im[11:17]) >= 33]
+    images = [im for im in images if int(im[11:17]) < 42 and int(im[11:17]) >= 32]
+    #images = [im for im in images if int(im[11:17]) == 39]
     #images = [im for im in images if int(im[11:17]) < 200 ]
     cams = sorted(set([im[7:10] for im in images]))
     #print(images)
@@ -84,19 +85,24 @@ if __name__ == '__main__':
         poses.append(RT)
         K = np.array(cameras[k]['K'])
         D = np.array(cameras[k]['dist'])
-        K[0][0] /= 2
-        K[1][1] /= 2
-        K[0][2] /= 2
-        K[1][2] /= 2
+        # K[0][0] /= 2
+        # K[1][1] /= 2
+        # K[0][2] /= 2
+        # K[1][2] /= 2
+        # W = W // 2
+        # H = H // 2
+        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
+        new_camera_matrix[0, 2] -= 100
+        new_camera_matrix[1, 2] -= 200
+        W, H = W - 200, H - 400
+
+        new_camera_matrix[0][0] /= 2
+        new_camera_matrix[1][1] /= 2
+        new_camera_matrix[0][2] /= 2
+        new_camera_matrix[1][2] /= 2
         W = W // 2
         H = H // 2
-        new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
         # mapx, mapy = cv2.initUndistortRectifyMap(K, D, None, new_camera_matrix, (W, H), cv2.CV_32FC1)
-        
-        new_camera_matrix[0, 2] -= 50
-        new_camera_matrix[1, 2] -= 100
-        
-        W, H = W - 100, H - 200
 
         # new_camera_matrix[0, 0] /= 2
         # new_camera_matrix[1, 1] /= 2

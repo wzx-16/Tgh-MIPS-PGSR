@@ -734,7 +734,7 @@ class GaussianModel:
         
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling) + 0.001
+        return self.scaling_activation(self._scaling)
     
     @property
     def get_scaling_t(self):
@@ -937,7 +937,7 @@ class GaussianModel:
         # pcd_list = ['points.ply' for _ in range(640)]
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 200:
-                if ii < 42 and ii >= 37:
+                if ii < 42 and ii >= 32:
                     
                     # if ii % 30 != 0:
                     #     continue
@@ -966,7 +966,7 @@ class GaussianModel:
                     features[:, 3:, 1:] = 0.0
                     if self.gaussian_dim == 4:
                         # seg = 2.5/4
-                        seg = 1 / fps * 5
+                        seg = 1 / fps * 2
                         # fused_times = torch.zeros_like(fused_point_cloud[..., :1]) + ((timestamp + seg/4 - time_duration[0]) // seg) * seg + seg/2 + time_duration[0] - seg/4
                         fused_times = (torch.zeros_like(fused_point_cloud[..., :1]) + timestamp - time_duration[0] + 1/fps/2) / 1
                     print("Number of points at initialisation : ", fused_point_cloud.shape[0], timestamp - time_duration[0])
@@ -1030,13 +1030,13 @@ class GaussianModel:
                     # del self.denom
                     # del self.optimizer
                     # gc.collect()
-                    # torch.cuda.empty_cache()
+                    #torch.cuda.empty_cache()
                     print(torch.cuda.memory_summary())
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
-        if pcd.points.shape[0] > 10000:
-            mask = np.random.randint(0, pcd.points.shape[0], 10000)
+        if pcd.points.shape[0] > 100:
+            mask = np.random.randint(0, pcd.points.shape[0], 100)
             xyz = pcd.points[mask]
             rgb = pcd.colors[mask]
             normals = pcd.normals[mask]
@@ -1185,6 +1185,12 @@ class GaussianModel:
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def reset_opacity_cpu(self):
+        opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        self._opacity = opacities_new
+        self.opt_states["opacity"]["exp_avg"] = torch.zeros_like(self._opacity)
+        self.opt_states["opacity"]["exp_avg_sq"] = torch.zeros_like(self._opacity)
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

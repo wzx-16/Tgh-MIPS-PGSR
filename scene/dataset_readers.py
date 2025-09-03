@@ -316,11 +316,13 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             depth = None
         tbar.update(1)
         if 'fl_x' in frame and 'fl_y' in frame and 'cx' in frame and 'cy' in frame:
-            FovX = FovY = -1.0
+            #FovX = FovY = -1.0
             fl_x = frame['fl_x']
             fl_y = frame['fl_y']
             cx = frame['cx']
             cy = frame['cy']
+            FovX = focal2fov(fl_x, width)
+            FovY = focal2fov(fl_y, height)
             return CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=depth,
                         image_path=image_path, image_name=image_name, width=width, height=height, timestamp=timestamp,
                         fl_x=fl_x, fl_y=fl_y, cx=cx, cy=cy)

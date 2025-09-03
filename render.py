@@ -20,6 +20,7 @@ from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
+import math
 
 def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
@@ -64,8 +65,16 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 10], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
         scene = Scene(dataset, gaussians, tgh, shuffle=False, render_only=True)
-
-        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
+        current_length = tgh.max_layer_length
+        point_cnt = 0
+        for level in range(0, 10):
+            #segment_count = (math.ceil((10) / current_length)) + 1
+            segment_count = len(tgh.layers[level])
+            for ind in range(segment_count):
+                point_cnt += tgh.layers[level][ind]._xyz.shape[0]
+            current_length /= 2
+        print("point count", point_cnt)
+        bg_color = [1,1,1] if dataset.white_background else [1, 1, 1]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:

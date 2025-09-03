@@ -36,6 +36,7 @@ import gc
 from datetime import datetime
 from PIL import Image
 import time
+import torch.multiprocessing
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -107,10 +108,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #scene.tgh.create_from_gaussians(gaussians, opt)
     # gaussian_init_flag = False
     training_dataset = scene.getTrainCameras()
-    training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=0 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
+    training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
     #print("test6")
     iteration = first_iter
-    fn_lpips = lpips.LPIPS(net='alex').cuda().eval()
+    fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
     # def lpips_tiled(im_chw, gt_chw, tile=512, overlap=64):
     #     im = im_chw.to('cuda', dtype=torch.float32)
     #     gt = gt_chw.to('cuda', dtype=torch.float32).detach()
@@ -169,6 +170,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
                 loaded_mask = loaded_mask.cuda()
+                # sky = (1 - loaded_mask) > 1 - 1e-6
+                # origin_gt = gt_image
+                #random_color = torch.zeros_like(gt_image, device = "cuda")
+        
+                #channel_idx = np.random.randint(0,3)
+                #print("random color", channel_idx)
+                #random_color[channel_idx, :, :] = 1.0
+                #gt_image[:, sky[0]] = random_color[:, sky[0]]
                 #render_start = time.time()
                 # copy_and_cat_engine.waitGroupCompletion(0, 0)
                 # render_pkg = render(viewpoint_cam, gaussians, pipe, background)
@@ -193,7 +202,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 ma = (mt > 0.05).squeeze()
                 # plt.hist(opacity[ma].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
-                background = 0*torch.rand(3, device="cuda")
+                background = torch.rand(3, device="cuda")
+                # sky_mask = (1 - loaded_mask) > 1 - 2e-2
+                # random_color = torch.zeros_like(gt_image, device = "cuda")
+                # random_color[0, :, :] = background[0]
+                # random_color[1, :, :] = background[1]
+                # random_color[2, :, :] = background[2]
+                # gt_image[:, sky_mask[0]] = random_color[:, sky_mask[0]]
+                sky_mask_percentage = 1 - loaded_mask
+                random_color = torch.zeros_like(gt_image, device = "cuda")
+                random_color[0, :, :] = background[0]
+                random_color[1, :, :] = background[1]
+                random_color[2, :, :] = background[2]
+                gt_image = gt_image * loaded_mask + random_color * sky_mask_percentage
                 # print("gaussiansize")
                 # print(xyz.size())
                 # print(opacity.size())
@@ -431,7 +452,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, opt.densify_grad_t_threshold)
                     
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    #if iteration % 100 == 0:
                         gaussians.reset_opacity()
+                        tgh.reset_opacity()
                         
                 # Optimizer step
                 if iteration < opt.iterations:
@@ -566,6 +589,7 @@ def setup_seed(seed):
 
 if __name__ == "__main__":
     # Set up command line argument parser
+    #torch.multiprocessing.set_sharing_strategy('file_system')
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
@@ -604,7 +628,7 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(2000,args.iterations + 1,3000)]
+    args.save_iterations = args.save_iterations + [i for i in range(10000,args.iterations + 1,10000)]
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)
