@@ -341,7 +341,8 @@ class TemperalGaussianHierarchy():
             gaussians.opt_states,
             gaussians._t,
             gaussians._scaling_t,
-            gaussians._velocity) = t
+            gaussians._velocity,
+            gaussians._rot_velocity) = t
 
     def capture(self, gaussians : GaussianModel, opt):
         # static_layer = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
@@ -437,7 +438,8 @@ class TemperalGaussianHierarchy():
             gaussians.opt_states,
             gaussians._t,
             gaussians._scaling_t,
-            gaussians._velocity
+            gaussians._velocity,
+            gaussians._rot_velocity
             #gaussians._rotation_r
         )
     

@@ -44,13 +44,14 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         tgh.put_current_related_gaussians(timestamp, gaussians, True)
         #timestamp = viewpoint_cam.timestamp
         xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
+        rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
         opacity = gaussians.get_opacity * mt
         shs = gaussians.get_features
         ma = (mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+                                                    gaussians.get_scaling, rot, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]

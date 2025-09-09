@@ -85,6 +85,7 @@ class GaussianModel:
         self.time_duration = time_duration
         self.rot_4d = rot_4d
         self._velocity = torch.empty(0, device=device)
+        self._rot_velocity = torch.empty(0, device = device)
         self.force_sh_3d = force_sh_3d
         self.t_gradient_accum = torch.empty(0, device=device)
         if self.rot_4d or self.force_sh_3d:
@@ -135,6 +136,7 @@ class GaussianModel:
                 self._t,
                 self._scaling_t,
                 self._velocity,
+                self._rot_velocity,
                 self.rot_4d,
                 self.env_map,
                 self.active_sh_degree_t
@@ -173,6 +175,7 @@ class GaussianModel:
             self._t,
             self._scaling_t,
             self._velocity,
+            self._rot_velocity,
             self.rot_4d,
             self.env_map,
             self.active_sh_degree_t) = model_args
@@ -206,6 +209,7 @@ class GaussianModel:
             self._t = gaussians._t[mask].to(self.device)
             self._scaling_t = gaussians._scaling_t[mask].to(self.device)
             self._velocity = gaussians._velocity[mask].to(self.device)
+            self._rot_velocity = gaussians._rot_velocity[mask].to(self.device)
 
             self.rot_4d = gaussians.rot_4d
             # if gaussians.env_map is not None:
@@ -247,6 +251,7 @@ class GaussianModel:
             new_gaussians._t = torch.cat([new_gaussians._t, gaussians._t[mask].to(self.device)])
             new_gaussians._scaling_t = torch.cat([new_gaussians._scaling_t, gaussians._scaling_t[mask].to(self.device)])
             new_gaussians._velocity = torch.cat([new_gaussians._velocity, gaussians._velocity[mask].to(self.device)])
+            new_gaussians._rot_velocity = torch.cat([new_gaussians._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
 
             # new_gaussians._xyz = gaussians._xyz[mask].to(self.device)
             # new_gaussians._features_dc = gaussians._features_dc[mask].to(self.device)
@@ -333,6 +338,11 @@ class GaussianModel:
             velocity_list.append(segment._velocity.cuda())
         self._velocity = nn.Parameter(torch.cat(velocity_list))
 
+        rot_velocity_list = []
+        for segment in gaussians_segments:
+            rot_velocity_list.append(segment._rot_velocity.cuda())
+        self._rot_velocity = nn.Parameter(torch.cat(rot_velocity_list))
+
         max_radii2D_list = []
         for segment in gaussians_segments:
             max_radii2D_list.append(segment.max_radii2D.cuda())
@@ -379,6 +389,7 @@ class GaussianModel:
         self._t = torch.empty(0, 1, device=self.device)
         self._scaling_t = torch.empty(0, 1, device=self.device)
         self._velocity = torch.empty(0, 3, device=self.device)
+        self._rot_velocity = torch.empty(0, 4, device=self.device)
     
         self.rot_4d = gaussians.rot_4d
         self.gaussian_dim = gaussians.gaussian_dim
@@ -398,77 +409,77 @@ class GaussianModel:
                 state_content["exp_avg_sq"] = torch.empty(0, device=self.device)
                 self.opt_states[group["name"]] = state_content
     
-    def clone_to(self, gaussians : "GaussianModel"):
-        #new_gaussian = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
-        # new_gaussian.restore([self.active_sh_degree, self._xyz, self._features_dc, self._features_rest, self._scaling, self._rotation,
-        #                     self._opacity, self.max_radii2D, self.xyz_gradient_accum, self.t_gradient_accum, self.denom,
-        #                     self.spatial_lr_scale, self._t, self._scaling_t, self._velocity, self.rot_4d, self.env_map, self.active_sh_degree_t], None)
-        #gaussians.active_sh_degree = self.active_sh_degree
-        state_dict = {}
-        if gaussians._xyz in gaussians.optimizer.state:
-            state_dict["xyz"] = gaussians.optimizer.state[gaussians._xyz]
-            del gaussians.optimizer.state[gaussians._xyz]
-        gaussians._xyz = nn.Parameter(self._xyz.cuda())
+    # def clone_to(self, gaussians : "GaussianModel"):
+    #     #new_gaussian = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
+    #     # new_gaussian.restore([self.active_sh_degree, self._xyz, self._features_dc, self._features_rest, self._scaling, self._rotation,
+    #     #                     self._opacity, self.max_radii2D, self.xyz_gradient_accum, self.t_gradient_accum, self.denom,
+    #     #                     self.spatial_lr_scale, self._t, self._scaling_t, self._velocity, self.rot_4d, self.env_map, self.active_sh_degree_t], None)
+    #     #gaussians.active_sh_degree = self.active_sh_degree
+    #     state_dict = {}
+    #     if gaussians._xyz in gaussians.optimizer.state:
+    #         state_dict["xyz"] = gaussians.optimizer.state[gaussians._xyz]
+    #         del gaussians.optimizer.state[gaussians._xyz]
+    #     gaussians._xyz = nn.Parameter(self._xyz.cuda())
 
-        if gaussians._features_dc in gaussians.optimizer.state:
-            state_dict["f_dc"] = gaussians.optimizer.state[gaussians._features_dc]
-            del gaussians.optimizer.state[gaussians._features_dc]
-        gaussians._features_dc = nn.Parameter(self._features_dc.cuda())
+    #     if gaussians._features_dc in gaussians.optimizer.state:
+    #         state_dict["f_dc"] = gaussians.optimizer.state[gaussians._features_dc]
+    #         del gaussians.optimizer.state[gaussians._features_dc]
+    #     gaussians._features_dc = nn.Parameter(self._features_dc.cuda())
 
-        if gaussians._features_rest in gaussians.optimizer.state:
-            state_dict["f_rest"] = gaussians.optimizer.state[gaussians._features_rest]
-            del gaussians.optimizer.state[gaussians._features_rest]
-        gaussians._features_rest = nn.Parameter(self._features_rest.cuda())
+    #     if gaussians._features_rest in gaussians.optimizer.state:
+    #         state_dict["f_rest"] = gaussians.optimizer.state[gaussians._features_rest]
+    #         del gaussians.optimizer.state[gaussians._features_rest]
+    #     gaussians._features_rest = nn.Parameter(self._features_rest.cuda())
 
-        if gaussians._scaling in gaussians.optimizer.state:
-            state_dict["scaling"] = gaussians.optimizer.state[gaussians._scaling]
-            del gaussians.optimizer.state[gaussians._scaling]
-        gaussians._scaling = nn.Parameter(self._scaling.cuda())
+    #     if gaussians._scaling in gaussians.optimizer.state:
+    #         state_dict["scaling"] = gaussians.optimizer.state[gaussians._scaling]
+    #         del gaussians.optimizer.state[gaussians._scaling]
+    #     gaussians._scaling = nn.Parameter(self._scaling.cuda())
 
-        if gaussians._rotation in gaussians.optimizer.state:
-            state_dict["rotation"] = gaussians.optimizer.state[gaussians._rotation]
-            del gaussians.optimizer.state[gaussians._rotation]
-        gaussians._rotation = nn.Parameter(self._rotation.cuda())
+    #     if gaussians._rotation in gaussians.optimizer.state:
+    #         state_dict["rotation"] = gaussians.optimizer.state[gaussians._rotation]
+    #         del gaussians.optimizer.state[gaussians._rotation]
+    #     gaussians._rotation = nn.Parameter(self._rotation.cuda())
 
-        if gaussians._opacity in gaussians.optimizer.state:
-            state_dict["opacity"] = gaussians.optimizer.state[gaussians._opacity]
-            del gaussians.optimizer.state[gaussians._opacity]
-        gaussians._opacity = nn.Parameter(self._opacity.cuda())
+    #     if gaussians._opacity in gaussians.optimizer.state:
+    #         state_dict["opacity"] = gaussians.optimizer.state[gaussians._opacity]
+    #         del gaussians.optimizer.state[gaussians._opacity]
+    #     gaussians._opacity = nn.Parameter(self._opacity.cuda())
 
-        gaussians.max_radii2D = self.max_radii2D.cuda()
+    #     gaussians.max_radii2D = self.max_radii2D.cuda()
 
-        gaussians.xyz_gradient_accum = self.xyz_gradient_accum.cuda()
-        gaussians.xyz_gradient_accum_abs = self.xyz_gradient_accum_abs.cuda()
-        gaussians.t_gradient_accum = self.t_gradient_accum.cuda()
-        gaussians.denom = self.denom.cuda()
-        #gaussians.spatial_lr_scale = self.spatial_lr_scale.cuda()
-        if gaussians._t in gaussians.optimizer.state:
-            state_dict["t"] = gaussians.optimizer.state[gaussians._t]
-            del gaussians.optimizer.state[gaussians._t]
-        gaussians._t = nn.Parameter(self._t.cuda())
+    #     gaussians.xyz_gradient_accum = self.xyz_gradient_accum.cuda()
+    #     gaussians.xyz_gradient_accum_abs = self.xyz_gradient_accum_abs.cuda()
+    #     gaussians.t_gradient_accum = self.t_gradient_accum.cuda()
+    #     gaussians.denom = self.denom.cuda()
+    #     #gaussians.spatial_lr_scale = self.spatial_lr_scale.cuda()
+    #     if gaussians._t in gaussians.optimizer.state:
+    #         state_dict["t"] = gaussians.optimizer.state[gaussians._t]
+    #         del gaussians.optimizer.state[gaussians._t]
+    #     gaussians._t = nn.Parameter(self._t.cuda())
 
-        if gaussians._scaling_t in gaussians.optimizer.state:
-            state_dict["scaling_t"] = gaussians.optimizer.state[gaussians._scaling_t]
-            del gaussians.optimizer.state[gaussians._scaling_t]
-        gaussians._scaling_t = nn.Parameter(self._scaling_t.cuda())
+    #     if gaussians._scaling_t in gaussians.optimizer.state:
+    #         state_dict["scaling_t"] = gaussians.optimizer.state[gaussians._scaling_t]
+    #         del gaussians.optimizer.state[gaussians._scaling_t]
+    #     gaussians._scaling_t = nn.Parameter(self._scaling_t.cuda())
 
-        if gaussians._velocity in gaussians.optimizer.state:
-            state_dict["velocity"] = gaussians.optimizer.state[gaussians._velocity]
-            del gaussians.optimizer.state[gaussians._velocity]
-        gaussians._velocity = nn.Parameter(self._velocity.cuda())
+    #     if gaussians._velocity in gaussians.optimizer.state:
+    #         state_dict["velocity"] = gaussians.optimizer.state[gaussians._velocity]
+    #         del gaussians.optimizer.state[gaussians._velocity]
+    #     gaussians._velocity = nn.Parameter(self._velocity.cuda())
 
-        gaussians.rot_4d = self.rot_4d
-        # if self.env_map is not None:
-        #     gaussians.env_map = self.env_map.cuda()
-        #gaussians.active_sh_degree_t = self.active_sh_degree_t
-        #gaussians.percent_dense = self.percent_dense
-        #new_gaussian.optimizer = self.optimizer
-        #gaussians.max_sh_degree = self.max_sh_degree
-        gaussians.gaussian_dim = self.gaussian_dim
-        gaussians.time_duration = self.time_duration
-        gaussians.force_sh_3d = self.force_sh_3d
-        gaussians.max_sh_degree_t = self.max_sh_degree_t
-        return state_dict
+    #     gaussians.rot_4d = self.rot_4d
+    #     # if self.env_map is not None:
+    #     #     gaussians.env_map = self.env_map.cuda()
+    #     #gaussians.active_sh_degree_t = self.active_sh_degree_t
+    #     #gaussians.percent_dense = self.percent_dense
+    #     #new_gaussian.optimizer = self.optimizer
+    #     #gaussians.max_sh_degree = self.max_sh_degree
+    #     gaussians.gaussian_dim = self.gaussian_dim
+    #     gaussians.time_duration = self.time_duration
+    #     gaussians.force_sh_3d = self.force_sh_3d
+    #     gaussians.max_sh_degree_t = self.max_sh_degree_t
+    #     return state_dict
     
     def get_state_dict(self):
         #new_gaussian = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
@@ -526,6 +537,10 @@ class GaussianModel:
         if self._velocity in self.optimizer.state:
             state_dict["velocity"] = self.optimizer.state[self._velocity]
             del self.optimizer.state[self._velocity]
+        
+        if self._rot_velocity in self.optimizer.state:
+            state_dict["rot_velocity"] = self.optimizer.state[self._rot_velocity]
+            del self.optimizer.state[self._rot_velocity]
         #gaussians._velocity = nn.Parameter(self._velocity.cuda())
 
         #gaussians.rot_4d = self.rot_4d
@@ -562,6 +577,8 @@ class GaussianModel:
                 group["params"][0] = self._scaling_t
             if group["name"] == "velocity":
                 group["params"][0] = self._velocity
+            if group["name"] == "rot_velocity":
+                group["params"][0] = self._rot_velocity
 
     def get_param_group_corresponding_attr(self, group_name):
         if group_name == "xyz":
@@ -582,6 +599,8 @@ class GaussianModel:
             return self._scaling_t
         if group_name == "velocity":
             return self._velocity
+        if group_name == "rot_velocity":
+            return self._rot_velocity
         return None
 
     def append_from_gaussians_gpu(self, mask : torch.Tensor, gaussians : "GaussianModel", new_gaussians : "GaussianModel"):
@@ -602,6 +621,7 @@ class GaussianModel:
             self._scaling_t = torch.cat([self._scaling_t, gaussians._scaling_t[mask].to(self.device)])
             # print(self._velocity.device, gaussians._velocity.device)
             self._velocity = torch.cat([self._velocity, gaussians._velocity[mask].to(self.device)])
+            self._rot_velocity = torch.cat([self._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
             # if gaussians.env_map is not None:
             #     self.env_map = torch.cat([self.env_map, gaussians.env_map[mask]]).to(self.device)
             for group in gaussians.optimizer.param_groups:
@@ -638,6 +658,7 @@ class GaussianModel:
             new_gaussians._t = torch.cat([new_gaussians._t, self._t, gaussians._t[mask].to(self.device)])
             new_gaussians._scaling_t = torch.cat([new_gaussians._scaling_t, self._scaling_t, gaussians._scaling_t[mask].to(self.device)])
             new_gaussians._velocity = torch.cat([new_gaussians._velocity, self._velocity, gaussians._velocity[mask].to(self.device)])
+            new_gaussians._rot_velocity = torch.cat([new_gaussians._rot_velocity, self._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
             # if gaussians.env_map is not None:
             #     self.env_map = torch.cat([self.env_map, gaussians.env_map[mask]]).to(self.device)
             # for group in gaussians.optimizer.param_groups:
@@ -673,6 +694,7 @@ class GaussianModel:
         self._t = nn.Parameter(torch.cat([self._t, gaussians._t.cuda()]))
         self._scaling_t = nn.Parameter(torch.cat([self._scaling_t, gaussians._scaling_t.cuda()]))
         self._velocity = nn.Parameter(torch.cat([self._velocity, gaussians._velocity.cuda()]))
+        self._rot_velocity = nn.Parameter(torch.cat([self._rot_velocity, gaussians._rot_velocity.cuda()]))
         # if gaussians.env_map is not None:
         #     self.env_map = torch.cat([self.env_map, gaussians.env_map.cuda()])
 
@@ -757,6 +779,10 @@ class GaussianModel:
         return self._velocity
     
     @property
+    def get_rot_velocity(self):
+        return self._rot_velocity
+    
+    @property
     def get_xyz(self):
         return self._xyz
     
@@ -825,6 +851,7 @@ class GaussianModel:
             scales_t = torch.log(torch.sqrt(dist_t))
             if self.rot_4d:
                 velocity = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
+                rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
@@ -841,6 +868,7 @@ class GaussianModel:
             self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
             if self.rot_4d:
                 self._velocity = nn.Parameter(velocity.requires_grad_(True))
+                self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
 
         # self.spatial_lr_scale = spatial_lr_scale
         # fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float()
@@ -908,6 +936,7 @@ class GaussianModel:
             scales_t = torch.log(torch.sqrt(dist_t))
             if self.rot_4d:
                 velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
@@ -924,6 +953,7 @@ class GaussianModel:
             self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
             if self.rot_4d:
                 self._velocity = nn.Parameter(velocity.requires_grad_(True))
+                self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
 
     def create_from_multi_pcd(self, path, tgh, spatial_lr_scale : float, time_duration=None):
         self.spatial_lr_scale = spatial_lr_scale
@@ -936,12 +966,13 @@ class GaussianModel:
         with torch.no_grad():
         # pcd_list = ['points.ply' for _ in range(640)]
             for ii, pcd_path in enumerate(pcd_list[:]):
-                #if ii < 200:
-                if ii < 42 and ii >= 32:
-                    
+                #if ii < 100:
+                #if ii < 42 and ii >= 32:
+                if ii < 10:
+            
                     # if ii % 30 != 0:
                     #     continue
-                    timestamp = ii / fps
+                    timestamp = (ii+32) / fps
                     # timestamp = ii / fps
                     if time_duration is not None:
                         if timestamp < time_duration[0]:
@@ -951,8 +982,8 @@ class GaussianModel:
                     #break
                     ply_path = os.path.join(pcd_parent_path, pcd_path)
                     pcd = fetchPly(ply_path)
-                    if pcd.points.shape[0] > 150000:
-                        mask = np.random.randint(0, pcd.points.shape[0], 150000)
+                    if pcd.points.shape[0] > 1000:
+                        mask = np.random.randint(0, pcd.points.shape[0], 1000)
                         xyz = pcd.points[mask]
                         rgb = pcd.colors[mask]
                         normals = pcd.normals[mask]
@@ -966,7 +997,7 @@ class GaussianModel:
                     features[:, 3:, 1:] = 0.0
                     if self.gaussian_dim == 4:
                         # seg = 2.5/4
-                        seg = 1 / fps * 2
+                        seg = 1 / fps * 5
                         # fused_times = torch.zeros_like(fused_point_cloud[..., :1]) + ((timestamp + seg/4 - time_duration[0]) // seg) * seg + seg/2 + time_duration[0] - seg/4
                         fused_times = (torch.zeros_like(fused_point_cloud[..., :1]) + timestamp - time_duration[0] + 1/fps/2) / 1
                     print("Number of points at initialisation : ", fused_point_cloud.shape[0], timestamp - time_duration[0])
@@ -983,6 +1014,7 @@ class GaussianModel:
                         scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
                         if self.rot_4d:
                             velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                            rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
 
                     opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
@@ -998,6 +1030,7 @@ class GaussianModel:
                         self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
                         if self.rot_4d:
                             self._velocity = nn.Parameter(velocity.requires_grad_(True))
+                            self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
 
                     self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
                     # self.xyz_gradient_accum = torch.zeros_like(self._xyz, device=self.device)
@@ -1073,6 +1106,7 @@ class GaussianModel:
                 scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
                 if self.rot_4d:
                     velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                    rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
             #print("test1")
             opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
@@ -1089,6 +1123,7 @@ class GaussianModel:
                 _scaling_t = scales_t
                 if self.rot_4d:
                     _velocity = velocity
+                    _rot_velocity = rot_velocity
 
             # tgh.create_from_gaussians(self)
         #print("test3")
@@ -1106,6 +1141,7 @@ class GaussianModel:
             self._scaling_t = nn.Parameter(_scaling_t.requires_grad_(True))
             if self.rot_4d:
                 self._velocity = nn.Parameter(_velocity.requires_grad_(True))
+                self._rot_velocity = nn.Parameter(_rot_velocity.requires_grad_(True))
         # print(self.get_cov_t())
         # print(torch.sqrt(-math.log(0.05)/0.5*self.get_sigma_t[..., 0]).max())
         #print("test4")
@@ -1124,6 +1160,7 @@ class GaussianModel:
         rots = init_4d_gaussian['rotation'].cuda()
         scales_t = init_4d_gaussian['scaling_t'].cuda()
         velocity = init_4d_gaussian['velocity'].cuda()
+        rot_velocity = init_4d_gaussian['rot_velocity'].cuda()
 
         opacities = init_4d_gaussian['opacity'].cuda()
         
@@ -1138,6 +1175,7 @@ class GaussianModel:
         self._t = nn.Parameter(fused_times.requires_grad_(True))
         self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
         self._velocity = nn.Parameter(velocity.requires_grad_(True))
+        self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
@@ -1161,6 +1199,7 @@ class GaussianModel:
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
             if self.rot_4d:
                 l.append({'params': [self._velocity], 'lr': training_args.rotation_lr, "name": "velocity"})
+                l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         # self.optimizer = AdamWithMaskedUpdates(l, lr=0.0, eps=1e-15)
@@ -1247,6 +1286,7 @@ class GaussianModel:
             self._scaling_t = optimizable_tensors['scaling_t']
             if self.rot_4d:
                 self._velocity = optimizable_tensors['velocity']
+                self._rot_velocity = optimizable_tensors['rot_velocity']
             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
@@ -1271,7 +1311,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_rot_velocity):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -1284,6 +1324,7 @@ class GaussianModel:
             d["scaling_t"] = new_scaling_t
             if self.rot_4d:
                 d["velocity"] = new_velocity
+                d["rot_velocity"] = new_rot_velocity
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -1297,6 +1338,7 @@ class GaussianModel:
             self._scaling_t = optimizable_tensors['scaling_t']
             if self.rot_4d:
                 self._velocity = optimizable_tensors['velocity']
+                self._rot_velocity = optimizable_tensors['rot_velocity']
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -1329,6 +1371,7 @@ class GaussianModel:
             new_t = None
             new_scaling_t = None
             new_velocity = None
+            new_rot_velocity = None
             if self.gaussian_dim == 4:
                 stds_t = self.get_scaling_t[selected_pts_mask].repeat(N,1)
                 means_t = torch.zeros((stds_t.size(0), 1),device=self.device)
@@ -1347,8 +1390,9 @@ class GaussianModel:
             new_t = new_xyzt[...,3:4]
             new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1) / (0.8*N))
             new_velocity = self._velocity[selected_pts_mask].repeat(N,1)
+            new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_rot_velocity)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -1369,13 +1413,15 @@ class GaussianModel:
         new_t = None
         new_scaling_t = None
         new_velocity = None
+        new_rot_velocity = None
         if self.gaussian_dim == 4:
             new_t = self._t[selected_pts_mask]
             new_scaling_t = self._scaling_t[selected_pts_mask]
             if self.rot_4d:
                 new_velocity = self._velocity[selected_pts_mask]
+                new_rot_velocity = self._rot_velocity[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_rot_velocity)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_t=None, prune_only=False):
         if not prune_only:

@@ -192,6 +192,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # _, gpu_mask = t_tree_model.find_t_batch([viewpoint_cam.timestamp])
                 
                 xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
+                rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
                 opacity = gaussians.get_opacity * mt
@@ -219,7 +220,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(xyz.size())
                 # print(opacity.size())
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+                                    gaussians.get_scaling, rot, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
                 
@@ -228,7 +229,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(f"render time {render_end - render_start:.6f} second")
                 if iteration%100==1:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    cv2.imwrite("./test/debug_render_{}.jpg".format(viewpoint_cam.image_name + "_" + timestamp), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
+                    cv2.imwrite("./test/debug_render_c_{}.jpg".format(viewpoint_cam.image_name + "_" + timestamp), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
                 
                 #loss_start = time.time()
                 # Loss
@@ -435,6 +436,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #         torch.save((tgh.capture(gaussians, opt), iteration), scene.model_path + "/tgh_chkpnt_best.pth")
                         
                 if (iteration in saving_iterations):
+                #if iteration % 100 == 0:
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
                     scene.save(iteration, opt, tgh)
 
