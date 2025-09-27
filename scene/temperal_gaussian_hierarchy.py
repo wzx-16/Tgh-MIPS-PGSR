@@ -342,7 +342,23 @@ class TemperalGaussianHierarchy():
             gaussians._t,
             gaussians._scaling_t,
             gaussians._velocity,
-            gaussians._rot_velocity) = t
+            gaussians._velocity2,
+            gaussians._velocity3,
+            gaussians._rot_velocity
+            ) = t
+        gaussians._xyz = gaussians._xyz.cuda()
+        gaussians._features_dc = gaussians._features_dc.cuda()
+        gaussians._features_rest = gaussians._features_rest.cuda()
+        gaussians._scaling = gaussians._scaling.cuda()
+        gaussians._rotation = gaussians._rotation.cuda()
+        gaussians._opacity = gaussians._opacity.cuda()
+        gaussians.max_radii2D = gaussians.max_radii2D.cuda()
+        gaussians._t = gaussians._t.cuda()
+        gaussians._scaling_t = gaussians._scaling_t.cuda()
+        gaussians._velocity = gaussians._velocity.cuda()
+        gaussians._velocity2 = gaussians._velocity2.cuda()
+        gaussians._velocity3 = gaussians._velocity3.cuda()
+        gaussians._rot_velocity = gaussians._rot_velocity.cuda()
 
     def capture(self, gaussians : GaussianModel, opt):
         # static_layer = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
@@ -439,6 +455,8 @@ class TemperalGaussianHierarchy():
             gaussians._t,
             gaussians._scaling_t,
             gaussians._velocity,
+            gaussians._velocity2,
+            gaussians._velocity3,
             gaussians._rot_velocity
             #gaussians._rotation_r
         )

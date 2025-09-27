@@ -53,8 +53,8 @@ if __name__ == '__main__':
     # load data
     images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(args.path, "images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
     #images = [im for im in images if int(im[11:17]) < 42 and int(im[11:17]) >= 32]
-    images = [im for im in images if int(im[11:17]) < 100 ]
-    cams = sorted(set([im[7:10] for im in images]))
+    images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 60)]
+    cams = sorted(set([im[7:14] for im in images]))
     #print(images)
     print(cams)
     
@@ -65,8 +65,8 @@ if __name__ == '__main__':
         calib = json.load(f)
     #poses_bounds = np.load(os.path.join(args.path, 'poses_bounds.npy'))
     #N = poses_bounds.shape[0]
-    cameras = calib["cameras"]
-    camera_poses = calib["camera_poses"]
+    cameras = calib
+    #camera_poses = calib["camera_poses"]
     N = len(cameras.keys())
     poses = []
     Ks = []
@@ -77,13 +77,13 @@ if __name__ == '__main__':
         #     continue
         cam_names.append(k)
         RT = np.eye(4)
-        RT[:3, :3] = np.array(camera_poses[k]['R'])
-        RT[:3, 3] = np.array(camera_poses[k]['T']).reshape(3)
+        RT[:3, :3] = np.array(cameras[k]['R']).reshape((3,3))
+        RT[:3, 3] = np.array(cameras[k]['T'])
         RT = np.linalg.inv(RT)  # convert to world to camera
-        W, H = cameras[k]['image_size'][0], cameras[k]['image_size'][1]
+        W, H = cameras[k]['imgSize'][0], cameras[k]['imgSize'][1]
         poses.append(RT)
-        K = np.array(cameras[k]['K'])
-        D = np.array(cameras[k]['dist'])
+        K = np.array(cameras[k]['K']).reshape((3,3))
+        D = np.array(cameras[k]['distCoeff'])
         # K[0][0] /= 2
         # K[1][1] /= 2
         # K[0][2] /= 2
@@ -92,8 +92,8 @@ if __name__ == '__main__':
         # H = H // 2
         new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
         new_camera_matrix[0, 2] -= 100
-        new_camera_matrix[1, 2] -= 200
-        W, H = W - 200, H - 400
+        new_camera_matrix[1, 2] -= 100
+        W, H = W - 200, H - 200
 
         new_camera_matrix[0][0] /= 2
         new_camera_matrix[1][1] /= 2
@@ -266,7 +266,7 @@ if __name__ == '__main__':
                        'cx': Ks[i][0, 2],
                        'cy': Ks[i][1, 2],
                        'transform_matrix': poses[i].tolist(),
-                       'time': int(im.lstrip("/").split('.')[0][-4:]) / 30.} for im in images if cams[i] == im[7:10]]
+                       'time': int(im.lstrip("/").split('.')[0][-4:]) / 30.} for im in images if cams[i] == im[7:14]]
         if i == 0:
             test_frames += cam_frames
         else:

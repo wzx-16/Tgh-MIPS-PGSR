@@ -37,12 +37,17 @@ from datetime import datetime
 from PIL import Image
 import time
 import torch.multiprocessing
+from torchvision import transforms
+import torchvision
 
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
+
+from transformers import pipeline
+from diffusers import DiffusionPipeline
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size):
@@ -112,6 +117,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #print("test6")
     iteration = first_iter
     fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
+    depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
+    #depth_guidance_checkpoint = "LiheYoung/depth-anything-base-hf"
+    pipe_depth = pipeline("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
+    pipe_depth.model.eval()
+
+    #pipe_normal = DiffusionPipeline.from_pretrained("GonzaloMG/stable-diffusion-e2e-ft-normals",custom_pipeline="GonzaloMG/marigold-e2e-ft-normals",).to("cuda")
+    # pipe_normal.eval()
     # def lpips_tiled(im_chw, gt_chw, tile=512, overlap=64):
     #     im = im_chw.to('cuda', dtype=torch.float32)
     #     gt = gt_chw.to('cuda', dtype=torch.float32).detach()
@@ -158,6 +170,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #cpu_to_cuda_start = time.time()
                     #put_gaussians_start = time.time()
                     scene.tgh.put_current_related_gaussians(viewpoint_cam.timestamp, gaussians)
+                    #pass
                     # put_gaussians_end = time.time()
                     # torch.cuda.synchronize()
                     # print(f"put gaussians time{put_gaussians_end - put_gaussians_start:.6f}second")
@@ -169,7 +182,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #render_start = time.time()
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
-                loaded_mask = loaded_mask.cuda()
+                #loaded_mask = loaded_mask.cuda()
                 # sky = (1 - loaded_mask) > 1 - 1e-6
                 # origin_gt = gt_image
                 #random_color = torch.zeros_like(gt_image, device = "cuda")
@@ -191,8 +204,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 viewpoint_cam = viewpoint_cam.cuda()
                 # _, gpu_mask = t_tree_model.find_t_batch([viewpoint_cam.timestamp])
                 
-                xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
-                rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
+                #xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
+                #xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
+                time_range = viewpoint_cam.timestamp - gaussians.get_t
+                #time_range_offset = torch.abs(time_range) + 0.5
+                # time_range2 = time_range_offset * time_range_offset
+                # time_range3 = time_range_offset**2 * time_range
+                #time_range2 = time_range**2
+                #time_range3 = time_range**3
+                xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
+                #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
+                #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
                 opacity = gaussians.get_opacity * mt
@@ -203,24 +225,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 ma = (mt > 0.05).squeeze()
                 # plt.hist(opacity[ma].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
-                background = torch.rand(3, device="cuda")
+                #background = torch.rand(3, device="cuda")
                 # sky_mask = (1 - loaded_mask) > 1 - 2e-2
                 # random_color = torch.zeros_like(gt_image, device = "cuda")
                 # random_color[0, :, :] = background[0]
                 # random_color[1, :, :] = background[1]
                 # random_color[2, :, :] = background[2]
                 # gt_image[:, sky_mask[0]] = random_color[:, sky_mask[0]]
-                sky_mask_percentage = 1 - loaded_mask
-                random_color = torch.zeros_like(gt_image, device = "cuda")
-                random_color[0, :, :] = background[0]
-                random_color[1, :, :] = background[1]
-                random_color[2, :, :] = background[2]
-                gt_image = gt_image * loaded_mask + random_color * sky_mask_percentage
+                # sky_mask_percentage = 1 - loaded_mask
+                # random_color = torch.zeros_like(gt_image, device = "cuda")
+                # random_color[0, :, :] = background[0]
+                # random_color[1, :, :] = background[1]
+                # random_color[2, :, :] = background[2]
+                # gt_image = gt_image * loaded_mask + random_color * sky_mask_percentage
                 # print("gaussiansize")
                 # print(xyz.size())
                 # print(opacity.size())
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, rot, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
                 
@@ -229,7 +251,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(f"render time {render_end - render_start:.6f} second")
                 if iteration%100==1:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    cv2.imwrite("./test/debug_render_c_{}.jpg".format(viewpoint_cam.image_name + "_" + timestamp), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
+                    cv2.imwrite("./test/debug_render1_{}.jpg".format(timestamp + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
                 
                 #loss_start = time.time()
                 # Loss
@@ -251,6 +273,63 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # image_resize = torch.nn.functional.interpolate(image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # lp_resize = fn_lpips(image_resize, gt_image_resize, normalize=True)
                 loss = loss + 0.01 * lp.mean()
+                #print("loss 1", loss)
+                if iteration < 0:
+                    depth_weight_conf = 1.0 - get_img_grad_weight(gt_image)
+                    with torch.no_grad():
+                        to_pil_image = transforms.ToPILImage()
+                        gt_pil = to_pil_image(gt_image)
+                        sgt_depth = pipe_depth(gt_pil)
+                        predicted_depth = sgt_depth["predicted_depth"].cuda()
+                        #print("predicted depth", predicted_depth.shape)
+                    depth_norm = (predicted_depth - predicted_depth.mean()) / predicted_depth.std()
+                    render_depth = render_pkg["depth"]
+                    #print("render depth", render_depth.shape)
+                    render_depth_norm = (render_depth - render_depth.mean()) / render_depth.std()
+                    if iteration < 1000:
+                        pass
+                    elif iteration < 5000:
+                        loss += 0.1 * torch.abs(depth_norm + render_depth_norm).mean()
+                    elif iteration < 10000:
+                        loss += 0.1 * (depth_weight_conf * torch.abs(depth_norm + render_depth_norm)).mean()
+                    if iteration % 100 == 1:
+                        predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
+                        render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
+                        torchvision.utils.save_image(render_depth_image, "render_depth.png")
+                        torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
+
+                if iteration < 0:
+                    with torch.no_grad():
+                        to_pil_image = transforms.ToPILImage()
+                        gt_pil = to_pil_image(gt_image)
+                        sgt_normal = pipe_normal(gt_pil)
+                        #print("sgt_normal", sgt_normal["prediction"].shape)
+                        predicted_normal = torch.from_numpy(sgt_normal["prediction"]).permute(0,3,1,2).squeeze(0).cuda()
+                        #predicted_normal = predicted_normal.reshape(3, -1)
+                        #_, H, W = gt_image.shape
+                        #pred_normal_rot = (torch.from_numpy(viewpoint_cam.R).to(torch.float32).cuda() @ predicted_normal).reshape(3, H, W)
+                        pred_normal_rot = predicted_normal
+                        #print("sgt_normal", predicted_normal.shape)
+                    #normal_norm = (predicted_normal - predicted_normal.mean()) / predicted_normal.std()
+                    normal_norm = torch.nn.functional.normalize(pred_normal_rot, dim=0, eps=1e-6)
+                    render_normal = render_pkg["rendered_normal"]
+                    #print("render normal", render_normal.shape)
+                    #render_normal_norm = (render_normal - render_normal.mean()) / render_normal.std()
+                    render_normal_norm = torch.nn.functional.normalize(render_normal, dim=0, eps=1e-6)
+                    loss += 0.05 * (1 - (render_normal_norm * normal_norm).sum(dim=0)).mean()
+                    if iteration % 100 == 1:
+                    #predicted_normal_image = (predicted_normal - predicted_normal.min()) / (predicted_normal.max() - predicted_normal.min())
+                    #render_normal_image = (render_normal - render_normal.min()) / (render_normal.max() - render_normal.min())
+                        torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
+                        torchvision.utils.save_image((normal_norm + 1) / 2, "predicted_normal.png")
+                #print("loss 2", loss)
+                #depth_image = depth_image.detach().cpu().numpy() * 255
+                # depth_image = depth_image.detach().cpu().numpy() * 255
+                # depth_image = Image.fromarray(depth_image.astype("uint8"))
+                # depth_image.save("depth.png")
+                # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                # cv2.imwrite("./test/debug_render_depth_{}.jpg".format(timestamp + "_" + viewpoint_cam.image_name), (depth_image.clip(min=0, max=1).squeeze().detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))
+                
                 #print("test10")
                 # loss = loss + 0.01 * lp.mean() + 0.01 * lp_resize.mean()
                 alpha = render_pkg["alpha"]
@@ -308,12 +387,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     Lmotion = velocity.norm(p=2, dim=1).mean()
                 #     loss = loss + opt.lambda_motion * Lmotion
                 # ########################
-                loss += 0.1 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
+                #loss += 0.1 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                 # _, cov_t = gaussians.get_current_cov_and_mean_t()
                 cov_t = gaussians.get_sigma_t
                 effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
                 # print(loss, '1')
-                loss += 0.1 * torch.clip(1/50/2 - effect_range, min=0.0).mean()
+                #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
+                loss += 0.1 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
+                #loss += 0.1 * torch.clip(5 - effect_range, min = 0.0).mean()
                 # print(loss, '2')
                 loss += 0.1 * (gaussians.get_opacity[gaussians.get_opacity>0.5] * gaussians.get_opacity[gaussians.get_opacity>0.5].detach() - 0.0).clip(min=0.0).mean()
                 # print(loss, '3')
@@ -327,7 +408,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     min_scale_loss = sorted_scale[...,0]
                     loss += 100 * min_scale_loss.mean()
                     loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
-                    loss += 0.001 * (gaussians.get_velocity / (gaussians.get_sigma_t + 1)).abs().mean()  # encourage velocity to be small
+                    #loss += 0.001 * (gaussians.get_velocity / (gaussians.get_sigma_t + 1)).abs().mean()  # encourage velocity to be small
+                    #velocity_norm = torch.norm(gaussians.get_velocity.detach(), p=2, dim=1).unsqueeze(1)
+                    #velocity_norm2 = torch.norm(gaussians.get_velocity2.detach(), p=2, dim=1).unsqueeze(1)
+                    #velocity_norm3 = torch.norm(gaussians.get_velocity3.detach(), p=2, dim=1).unsqueeze(1)
+                    #print("velocity_norm", velocity_norm.size())
+                    #print("effect_range", effect_range.size())
+                    #loss += 0.1 * ((time_duration[1] - time_duration[0]) - (((velocity_norm + velocity_norm2 + velocity_norm3) / 2 + 1) * effect_range)).clip(min=0).mean()
+                    #loss += 0.1 * ((velocity_norm2 + velocity_norm3) / (velocity_norm + 1e-6)).mean()
 
                 # single-view loss
                 if iteration > 3000:
@@ -363,7 +451,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     else:
                         normal_loss = weight * (((depth_normal - normal)).abs().sum(0)).mean()
                     loss += (normal_loss)# + (((normal_image - normal)).abs().sum(0)).mean()
-                    loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
+                    #loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
                 
                 loss = loss / batch_size
                 loss.backward()
@@ -599,8 +687,8 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=str)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[17_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[17_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--start_checkpoint", type=str, default = None)
     
@@ -630,7 +718,7 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(10000,args.iterations + 1,10000)]
+    args.save_iterations = args.save_iterations + [i for i in range(5000,args.iterations + 1,5000)]
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)

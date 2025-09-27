@@ -16,6 +16,8 @@ class SimpleKNN
 {
 public:
 	static void knn(int P, float3* points, float* meanDists);
+
+	static void knnb(int P1, float3* points1, int P2, float3* points2, float3* meanDists);
 };
 
 #endif

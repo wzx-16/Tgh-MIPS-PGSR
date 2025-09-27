@@ -8,15 +8,15 @@ batch_size: 1
 exhaust_test: True
 
 ModelParams:
-  sh_degree: 1
-  source_path: "data/N3V/tao"
-  model_path: "output/N3V/tao"
+  sh_degree: 3
+  source_path: "data/N3V/spoon"
+  model_path: "output/N3V/spoon"
   images: "images"
   resolution: 1
   white_background: False
   data_device: "cuda"
   eval: True
-  extension: ".jpg"
+  extension: ".png"
   num_extra_pts: 0
   loaded_pth: ""
   frame_ratio: 1
@@ -32,12 +32,12 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 120_000
+  iterations: 30_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 120_000
+  position_lr_max_steps: 30_000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -45,15 +45,15 @@ OptimizationParams:
   percent_dense: 0.01
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
-  densification_interval: 100
+  densification_interval: 300
   opacity_reset_interval: 10000
   densify_from_iter: 500
-  densify_until_iter: 90_000
+  densify_until_iter: 15_000
   densify_grad_threshold: 0.0001
   densify_grad_t_threshold: 0.0002 / 40 # 想办法用上
   densify_until_num_points: -1
   final_prune_from_iter: -1
   sh_increase_interval: 1000
-  lambda_opa_mask: 0.2
+  lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0

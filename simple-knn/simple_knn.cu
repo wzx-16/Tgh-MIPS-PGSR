@@ -18,6 +18,7 @@
 #include <cub/device/device_radix_sort.cuh>
 #include <vector>
 #include <cuda_runtime_api.h>
+#include <thrust/binary_search.h>
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
 #define __CUDACC__
@@ -144,6 +145,26 @@ __device__ void updateKBest(const float3& ref, const float3& point, float* knn)
 	}
 }
 
+template<int K>
+__device__ void updateKBestv(const float3& ref, const float3& point, float* knn, float3* knnxyz)
+{
+	float3 d = { point.x - ref.x, point.y - ref.y, point.z - ref.z };
+	float dist = d.x * d.x + d.y * d.y + d.z * d.z;
+	float3 p = point;
+	for (int j = 0; j < K; j++)
+	{
+		if (knn[j] > dist)
+		{
+			float t = knn[j];
+			knn[j] = dist;
+			dist = t;
+			float3 p_tmp = knnxyz[j];
+			knnxyz[j] = p;
+			p = p_tmp;
+		}
+	}
+}
+
 __global__ void boxMeanDist(uint32_t P, float3* points, uint32_t* indices, MinMax* boxes, float* dists)
 {
 	int idx = cg::this_grid().thread_rank();
@@ -182,6 +203,49 @@ __global__ void boxMeanDist(uint32_t P, float3* points, uint32_t* indices, MinMa
 	dists[indices[idx]] = (best[0] + best[1] + best[2]) / 3.0f;
 }
 
+__global__ void boxMeanDistb(uint32_t P1, float3* points1, uint32_t* indices1,  uint32_t P2, float3* points2, uint32_t* indices2, MinMax* boxes, float3* dists)
+{
+
+	int idx = cg::this_grid().thread_rank();
+	if (idx >= P1)
+		return;
+
+	float3 point = points1[idx];
+	float best[5] = { FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX, FLT_MAX };
+	float3 bestxyz[5] = {points1[idx], points1[idx], points1[idx], points1[idx], points1[idx]};
+
+	for (int i = max(0, indices1[idx] - 3); i <= min(P2 - 1, indices1[idx] + 3); i++)
+	{
+		// if (i == idx)
+		// 	continue;
+		updateKBest<5>(point, points2[indices2[i]], best);
+	}
+
+	float reject = best[2];
+	best[0] = FLT_MAX;
+	best[1] = FLT_MAX;
+	best[2] = FLT_MAX;
+	best[3] = FLT_MAX;
+	best[4] = FLT_MAX;
+
+	for (int b = 0; b < (P2 + BOX_SIZE - 1) / BOX_SIZE; b++)
+	{
+		MinMax box = boxes[b];
+		float dist = distBoxPoint(box, point);
+		if (dist > reject || dist > best[2])
+			continue;
+
+		for (int i = b * BOX_SIZE; i < min(P2, (b + 1) * BOX_SIZE); i++)
+		{
+			// if (i == idx)
+			// 	continue;
+			updateKBestv<5>(point, points2[indices2[i]], best, bestxyz);
+		}
+	}
+	//dists[idx] = (bestxyz[0] + bestxyz[1] + bestxyz[2]) / 3.0f;
+	dists[idx] = make_float3((bestxyz[0].x + bestxyz[1].x + bestxyz[2].x + bestxyz[3].x + bestxyz[4].x) / 5.0f, (bestxyz[0].y + bestxyz[1].y + bestxyz[2].y + bestxyz[3].y + bestxyz[4].y) / 5.0f,  (bestxyz[0].z + bestxyz[1].z + bestxyz[2].z + bestxyz[3].z + bestxyz[4].z) / 5.0f);
+}
+
 void SimpleKNN::knn(int P, float3* points, float* meanDists)
 {
 	float3* result;
@@ -217,5 +281,66 @@ void SimpleKNN::knn(int P, float3* points, float* meanDists)
 	boxMinMax << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get());
 	boxMeanDist << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
 
+	cudaFree(result);
+}
+
+void SimpleKNN::knnb(int P1, float3* points1, int P2, float3* points2, float3* meanDists)
+{
+	float3* result;
+	// float3* result2;
+	cudaMalloc(&result, sizeof(float3));
+	//cudaMalloc(&result2, sizeof(float3));
+	size_t temp_storage_bytes;
+
+	float3 init = { 0, 0, 0 }, minn, maxx;
+
+	// allocate P1+P2 float3s
+	thrust::device_vector<float3> all(P1 + P2);
+
+	// copy both arrays into it
+	thrust::copy(points1, points1 + P1, all.begin());
+	thrust::copy(points2, points2 + P2, all.begin() + P1);
+
+
+	cub::DeviceReduce::Reduce(nullptr, temp_storage_bytes, all.data().get(), result, P1 + P2, CustomMin(), init);
+	thrust::device_vector<char> temp_storage(temp_storage_bytes);
+
+	cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, all.data().get(), result, P1 + P2, CustomMin(), init);
+	cudaMemcpy(&minn, result, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, all.data().get(), result, P1 + P2, CustomMax(), init);
+	cudaMemcpy(&maxx, result, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	// cub::DeviceReduce::Reduce(nullptr, temp_storage_bytes, points1, result1, P1, CustomMin(), init);
+	// thrust::device_vector<char> temp_storage(temp_storage_bytes);
+
+	// cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, points1, result1, P1, CustomMin(), init);
+	// cudaMemcpy(&minn1, result1, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	// cub::DeviceReduce::Reduce(temp_storage.data().get(), temp_storage_bytes, points1, result1, P1, CustomMax(), init);
+	// cudaMemcpy(&maxx1, result1, sizeof(float3), cudaMemcpyDeviceToHost);
+
+	thrust::device_vector<uint32_t> morton2(P2);
+	thrust::device_vector<uint32_t> morton1(P1);
+	thrust::device_vector<uint32_t> morton2_sorted(P2);
+	coord2Morton << <(P2 + 255) / 256, 256 >> > (P2, points2, minn, maxx, morton2.data().get());
+	coord2Morton << <(P1 + 255) / 256, 256 >> > (P1, points1, minn, maxx, morton1.data().get());
+
+	thrust::device_vector<uint32_t> indices2(P2);
+	thrust::sequence(indices2.begin(), indices2.end());
+	thrust::device_vector<uint32_t> indices2_sorted(P2);
+	thrust::device_vector<uint32_t> indices1_sorted(P1);
+
+	cub::DeviceRadixSort::SortPairs(nullptr, temp_storage_bytes, morton2.data().get(), morton2_sorted.data().get(), indices2.data().get(), indices2_sorted.data().get(), P2);
+	temp_storage.resize(temp_storage_bytes);
+
+	cub::DeviceRadixSort::SortPairs(temp_storage.data().get(), temp_storage_bytes, morton2.data().get(), morton2_sorted.data().get(), indices2.data().get(), indices2_sorted.data().get(), P2);
+
+	uint32_t num_boxes = (P2 + BOX_SIZE - 1) / BOX_SIZE;
+	thrust::device_vector<MinMax> boxes(num_boxes);
+	boxMinMax << <num_boxes, BOX_SIZE >> > (P2, points2, indices2_sorted.data().get(), boxes.data().get());
+	thrust::lower_bound(morton2_sorted.begin(), morton2_sorted.end(),morton1.begin(), morton1.end(), indices1_sorted.begin());
+	//boxMeanDist << <num_boxes, BOX_SIZE >> > (P, points, indices_sorted.data().get(), boxes.data().get(), meanDists);
+	boxMeanDistb << <num_boxes, BOX_SIZE >> > (P1, points1, indices1_sorted.data().get(), P2, points2, indices2_sorted.data().get(), boxes.data().get(), meanDists);
 	cudaFree(result);
 }

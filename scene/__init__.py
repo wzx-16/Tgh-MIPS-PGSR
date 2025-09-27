@@ -54,6 +54,9 @@ class Scene:
         elif os.path.exists(os.path.join(args.source_path, "calibration_full.json")):
             print("Found calibration_full.json file, assuming THU data set!")
             scene_info = sceneLoadTypeCallbacks["THU"](args.source_path, args.white_background, num_pts=num_pts, time_duration=time_duration, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader)
+        elif os.path.exists(os.path.join(args.source_path, "dataset.json")):
+            print("Found dataset.json, assuming nerfies dataset")
+            scene_info = sceneLoadTypeCallbacks["Nerfies"](args.source_path, True)
         else:
             assert False, "Could not recognize scene type!"
 
@@ -86,7 +89,7 @@ class Scene:
             
         if args.loaded_pth:
             #self.gaussians.create_from_pth(args.loaded_pth, self.cameras_extent)
-            #self.gaussians.restore(model_args=torch.load(args.loaded_pth, map_location="cuda:0")[0], training_args=None)
+            #self.gaussians.restore(model_args=torch.load(args.loaded_pth, map_location="cuda:0", weights_only=False)[0], training_args=None)
             (active_sh_degree, spatial_lr_scale, env_map, active_sh_degree_t) = self.tgh.restore(model_args=torch.load(args.loaded_pth, map_location="cpu", weights_only=False)[0], training_args=None)
             self.gaussians.active_sh_degree = active_sh_degree
             self.gaussians.spatial_lr_scale = spatial_lr_scale
@@ -101,13 +104,13 @@ class Scene:
                                                             "iteration_" + str(self.loaded_iter),
                                                             "point_cloud.ply"))
             else:
-                # self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+                #self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
                 self.gaussians.create_from_multi_pcd(args.source_path, tgh, self.cameras_extent, tgh.time_duration)
                 #self.tgh.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration, opt, tgh):
-        # torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt" + str(iteration) + ".pth")
-        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh_c_chkpnt" + str(iteration) + ".pth")
+        #torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt1_" + str(iteration) + ".pth")
+        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh1_chkpnt" + str(iteration) + ".pth")
 
     def getTrainCameras(self, scale=1.0):
         return CameraDataset(self.train_cameras[scale].copy(), self.white_background)

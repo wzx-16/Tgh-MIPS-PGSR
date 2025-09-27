@@ -21,13 +21,26 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 import math
+from torchvision import transforms
+from transformers import pipeline as pp
 
 def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
+    predicted_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "predicted_depth")
+    depth_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth_normal")
+    rendered_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_normal")
+    depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_depth")
+    depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
+    pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
+    pipe.model.eval()
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
+    makedirs(predicted_depth_path, exist_ok=True)
+    makedirs(depth_normal_path, exist_ok=True)
+    makedirs(rendered_normal_path, exist_ok=True)
+    makedirs(depth_path, exist_ok=True)
     timestamp_first = 0
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         #rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
@@ -38,44 +51,67 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #     timestamp_first +=1
         # if timestamp_first == 0:
         #     timestamp_first = timestamp
-        print(timestamp)
-        print(timestamp_first)
+        #print(timestamp)
+        #print(timestamp_first)
         print(viewpoint_cam.image_height, viewpoint_cam.image_width)
         tgh.put_current_related_gaussians(timestamp, gaussians, True)
         #timestamp = viewpoint_cam.timestamp
-        xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
-        rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
+        time_range = viewpoint_cam.timestamp - gaussians.get_t
+        #time_range_offset = torch.abs(time_range) + 0.5
+        # time_range2 = time_range_offset * time_range_offset
+        # time_range3 = time_range_offset**2 * time_range
+        # time_range2 = time_range**2
+        # time_range3 = time_range**3
+        xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
+        #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)
+        #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
+        #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
         opacity = gaussians.get_opacity * mt
         shs = gaussians.get_features
         ma = (mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, rot, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]
-        depth_normal = render_package["depth_normal"]
-        rendered_normal = render_package["rendered_normal"]
+        depth_normal = (render_package["depth_normal"] + 1.0) / 2
+        rendered_normal = (render_package["rendered_normal"] + 1.0) / 2
+        render_depth = render_package["depth"]
         gt = view[0][0:3, :, :]
+
+        to_pil_image = transforms.ToPILImage()
+        gt_pil = to_pil_image(gt)
+        sgt_depth = pipe(gt_pil)
+        predicted_depth = sgt_depth["predicted_depth"]
+
+        print("image size")
+        print(depth_normal.size(), gt.size())
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
+        predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
+        torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
+        render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
+        torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
     with torch.no_grad():
-        tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 10], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
+        tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
         scene = Scene(dataset, gaussians, tgh, shuffle=False, render_only=True)
         current_length = tgh.max_layer_length
         point_cnt = 0
-        for level in range(0, 10):
-            #segment_count = (math.ceil((10) / current_length)) + 1
-            segment_count = len(tgh.layers[level])
-            for ind in range(segment_count):
-                point_cnt += tgh.layers[level][ind]._xyz.shape[0]
-            current_length /= 2
-        print("point count", point_cnt)
-        bg_color = [1,1,1] if dataset.white_background else [1, 1, 1]
+        # for level in range(0, 10):
+        #     #segment_count = (math.ceil((10) / current_length)) + 1
+        #     segment_count = len(tgh.layers[level])
+        #     for ind in range(segment_count):
+        #         point_cnt += tgh.layers[level][ind]._xyz.shape[0]
+        #     current_length /= 2
+        # print("point count", point_cnt)
+        bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
