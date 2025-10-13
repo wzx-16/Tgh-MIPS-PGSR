@@ -13,13 +13,14 @@ import os
 import torch
 import random
 import json
-from utils.system_utils import searchForMaxIteration
+from utils.system_utils import searchForMaxIteration, mkdir_p
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from scene.temperal_gaussian_hierarchy import TemperalGaussianHierarchy
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 from utils.data_utils import CameraDataset
+from scene.NVDIFFREC import save_env_map, load_env
 
 class Scene:
 
@@ -97,6 +98,8 @@ class Scene:
             if env_map is not None:
                 self.gaussians.env_map = env_map.cuda()
             self.gaussians.active_sh_degree_t = active_sh_degree_t
+            cubemap_weights_path = os.path.join(self.model_path, "cubemap/iteration_14000/cubemap.pth")
+            self.gaussians.brdf_mlp = load_env(torch.load(cubemap_weights_path))
         else:
             if self.loaded_iter:
                 self.gaussians.load_ply(os.path.join(self.model_path,
@@ -110,7 +113,14 @@ class Scene:
 
     def save(self, iteration, opt, tgh):
         #torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt1_" + str(iteration) + ".pth")
-        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh1_chkpnt" + str(iteration) + ".pth")
+        #tgh.create_from_gaussians(gaussians)
+        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh_chkpnt" + str(iteration) + ".pth")
+        brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp/iteration_{iteration}/brdf_mlp.hdr")
+        mkdir_p(os.path.dirname(brdf_mlp_path))
+        save_env_map(brdf_mlp_path, self.gaussians.brdf_mlp)
+        cubemap_path = os.path.join(self.model_path, "cubemap/iteration_{}".format(iteration))
+        os.makedirs(cubemap_path, exist_ok=True)
+        torch.save(self.gaussians.brdf_mlp.base, os.path.join(cubemap_path, 'cubemap.pth'))
 
     def getTrainCameras(self, scale=1.0):
         return CameraDataset(self.train_cameras[scale].copy(), self.white_background)

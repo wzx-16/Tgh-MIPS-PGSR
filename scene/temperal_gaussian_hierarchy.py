@@ -70,6 +70,12 @@ class TemperalGaussianHierarchy():
             current_length = current_length * 2
             
         self.layers[0][0].append_from_gaussians_gpu(mask, gaussians, None)
+    
+    def clear_tgh(self):
+        for level in range(0, 10):
+            segment_count = len(self.layers[level])
+            for ind in range(segment_count):
+                self.layers[level][ind].clear_gaussians(None)
         
     def update_from_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
         #update_start = time.time()
@@ -344,7 +350,9 @@ class TemperalGaussianHierarchy():
             gaussians._velocity,
             gaussians._velocity2,
             gaussians._velocity3,
-            gaussians._rot_velocity
+            gaussians._rot_velocity,
+            gaussians._specular,
+            gaussians._roughness
             ) = t
         gaussians._xyz = gaussians._xyz.cuda()
         gaussians._features_dc = gaussians._features_dc.cuda()
@@ -359,6 +367,8 @@ class TemperalGaussianHierarchy():
         gaussians._velocity2 = gaussians._velocity2.cuda()
         gaussians._velocity3 = gaussians._velocity3.cuda()
         gaussians._rot_velocity = gaussians._rot_velocity.cuda()
+        gaussians._specular = gaussians._specular.cuda()
+        gaussians._roughness = gaussians._roughness.cuda()
 
     def capture(self, gaussians : GaussianModel, opt):
         # static_layer = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
@@ -457,7 +467,9 @@ class TemperalGaussianHierarchy():
             gaussians._velocity,
             gaussians._velocity2,
             gaussians._velocity3,
-            gaussians._rot_velocity
+            gaussians._rot_velocity,
+            gaussians._specular,
+            gaussians._roughness
             #gaussians._rotation_r
         )
     

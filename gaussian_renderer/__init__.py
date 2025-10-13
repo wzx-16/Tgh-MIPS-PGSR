@@ -19,6 +19,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 from utils.transformation_util import matrix_to_quaternion, quaternion_to_matrix
 from utils.graphics_utils import focal2fov, getProjectionMatrix, normal_from_depth_image
+import numpy as np
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
@@ -397,6 +398,10 @@ def render_3d_pgsr_anti(
     shs = None,
     mask = None,
     max_sh_channels=0,
+    normal = None,
+    reflect = None,
+    pc: GaussianModel = None,
+    iteration = 0,
 ):
     means3D = xyz
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -453,6 +458,22 @@ def render_3d_pgsr_anti(
     else:
         colors_precomp = None
 
+    xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / (pc.get_sigma_t + 1)
+    view_pos = viewpoint_camera.camera_center
+    diffuse   = pc.get_diffuse
+    specular  = pc.get_specular
+    roughness = pc.get_roughness
+    if iteration > 10000:
+        color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...])
+        shs = None
+        colors_precomp = color.squeeze() 
+    elif iteration < 0:
+        color = torch.sigmoid(diffuse - np.log(3.0))
+        colors_precomp = color.squeeze() 
+        shs = None
+    else:
+        colors_precomp = None
+
     if mask is not None:
         means2D = means2D[mask]
         means2D_abs = means2D_abs[mask]
@@ -465,6 +486,8 @@ def render_3d_pgsr_anti(
         scales = scales[mask]
         rotations = rotations[mask]
         opacity = opacity[mask]
+
+    #shs = None
 
     # cov = torch.cat([cov3D_precomp[..., :3], cov3D_precomp[..., 1:2], cov3D_precomp[..., 3:5], cov3D_precomp[..., 2:3], cov3D_precomp[..., 4:5], cov3D_precomp[..., 5:6]], dim=-1).reshape(-1, 3, 3)
     # # # print(cov)

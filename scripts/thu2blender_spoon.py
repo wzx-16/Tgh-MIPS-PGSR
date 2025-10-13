@@ -245,7 +245,7 @@ if __name__ == '__main__':
     # videos = [os.path.join(args.path, 'videos', vname) for vname in os.listdir(os.path.join(args.path, 'videos')) if vname.endswith(".mp4")]
     images_path = os.path.join(args.path, "images/")
     images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(args.path, "images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
-    images = [im for im in images if int(im[10:15]) < 12]
+    images = [im for im in images if int(im[10:15]) < 2]
 
     with open(os.path.join(args.path, 'calibration_full.json'), 'r') as f:
         calib = json.load(f)
@@ -264,12 +264,12 @@ if __name__ == '__main__':
         #     continue
         cams.append(k)
         RT = np.eye(4)
-        RT[:3, :3] = np.array(camera_poses[k]['R'])
+        RT[:3, :3] = np.array(camera_poses[k]['R']).reshape(3,3)
         RT[:3, 3] = np.array(camera_poses[k]['T']).reshape(3)
         RT = np.linalg.inv(RT)  # convert to world to camera
         W, H = cameras[k]['imgSize'][0], cameras[k]['imgSize'][1]
         poses.append(RT)
-        K = np.array(cameras[k]['K'])
+        K = np.array(cameras[k]['K']).reshape(3,3)
         Dis.append(np.array(cameras[k]['distCoeff']))
         #new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, Dis[-1], (W, H), 1, (W, H))
         print(k)
@@ -358,8 +358,9 @@ if __name__ == '__main__':
                        'cx': Ks[i][0, 2],
                        'cy': Ks[i][1, 2],
                        'transform_matrix': poses[i].tolist(),
-                       'time': (int(im.lstrip("/").split('.')[0][-4:]) / 30.) + time_offset[i]} for im in images if cams[i] == im[7:9]]
+                       'time': (int(im.lstrip("/").split('.')[0][-4:]) / 30.)} for im in images if cams[i] == im[7:9] and int(cams[i]) != 11]
         if i == 7:
+        #if i == -1:
             test_frames += cam_frames
         else:
             train_frames += cam_frames

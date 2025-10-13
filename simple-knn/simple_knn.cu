@@ -221,7 +221,7 @@ __global__ void boxMeanDistb(uint32_t P1, float3* points1, uint32_t* indices1,  
 		updateKBest<5>(point, points2[indices2[i]], best);
 	}
 
-	float reject = best[2];
+	float reject = best[4];
 	best[0] = FLT_MAX;
 	best[1] = FLT_MAX;
 	best[2] = FLT_MAX;
@@ -232,7 +232,7 @@ __global__ void boxMeanDistb(uint32_t P1, float3* points1, uint32_t* indices1,  
 	{
 		MinMax box = boxes[b];
 		float dist = distBoxPoint(box, point);
-		if (dist > reject || dist > best[2])
+		if (dist > reject || dist > best[4])
 			continue;
 
 		for (int i = b * BOX_SIZE; i < min(P2, (b + 1) * BOX_SIZE); i++)

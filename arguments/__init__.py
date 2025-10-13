@@ -85,10 +85,16 @@ class OptimizationParams(ParamGroup):
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 30_000
+        self.brdf_mlp_lr_init = 0.016
+        self.brdf_mlp_lr_final = 0.00016
+        self.brdf_mlp_lr_delay_mult = 0.01
+        self.brdf_mlp_lr_max_steps = 30_000
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
+        self.specular_lr = 0.0002
+        self.roughness_lr = 0.0002
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
         self.thresh_opa_prune = 0.005
@@ -104,6 +110,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

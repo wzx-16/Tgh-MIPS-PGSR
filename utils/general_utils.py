@@ -27,6 +27,18 @@ def PILtoTorch(pil_image, resolution):
     else:
         return resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
 
+def safe_normalize(x: torch.Tensor, eps: float =1e-20) -> torch.Tensor:
+    return x / length(x, eps)
+
+def length(x: torch.Tensor, eps: float =1e-20) -> torch.Tensor:
+    return torch.sqrt(torch.clamp(dot(x,x), min=eps)) # Clamp to avoid nan gradients because grad(sqrt(0)) = NaN
+
+def dot(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return torch.sum(x*y, -1, keepdim=True)
+
+def reflect(x: torch.Tensor, n: torch.Tensor) -> torch.Tensor:
+    return 2*dot(x, n)*n - x
+
 def get_expon_lr_func(
     lr_init, lr_final, lr_delay_steps=0, lr_delay_mult=1.0, max_steps=1000000
 ):

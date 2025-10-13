@@ -16,13 +16,14 @@ from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render, render_3d_pgsr_anti
 import torchvision
-from utils.general_utils import safe_state
+from utils.general_utils import safe_state, safe_normalize, reflect
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
 from gaussian_renderer import GaussianModel
 import math
 from torchvision import transforms
 from transformers import pipeline as pp
+import numpy as np
 
 def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
@@ -42,6 +43,39 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     makedirs(rendered_normal_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
     timestamp_first = 0
+    # cnts = []
+    # roots = []
+    # gaussians_segments = []
+
+    # roots.append(1)
+    # cnts.append(tgh.layers[0][0]._xyz.shape[0])
+    # gaussians_segments.append(tgh.layers[0][0])
+    # current_length = 10
+    # for level in range(1, 10):
+    #     #segment_count = (math.ceil((10) / current_length)) + 1
+    #     # gaussians_segments.clear()
+    #     # _scaling = torch.empty(0)
+    #     # _rotation = torch.empty(0)
+    #     # _velocity = torch.empty(0)
+    #     segment_count = len(tgh.layers[level])
+    #     #roots.append(segment_count)
+    #     act_seg_cnt = 0
+    #     for ind in range(segment_count):
+    #         # if (current_length * ind - (current_length /4)) > 2:
+    #         #     break
+    #         #point_cnt += tgh.layers[level][ind]._xyz.shape[0]
+    #         cnts.append(tgh.layers[level][ind]._xyz.shape[0])
+    #         gaussians_segments.append(tgh.layers[level][ind])
+    #         act_seg_cnt += 1
+    #     #print("act_seg_cnt", act_seg_cnt)
+    #     #print(len(gaussians_segments))
+    #     roots.append(act_seg_cnt)
+    #     current_length /= 2
+    # print("segment counts", len(gaussians_segments))
+    # gaussians.clone_from_cpu(gaussians_segments)
+    # print("roots", roots)
+    # #print("point count", point_cnt)
+    # gaussians.save_ply_w_cnts2("./", cnts, roots)
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         #rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
         viewpoint_cam = view[2].cuda()
@@ -71,8 +105,14 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         shs = gaussians.get_features
         ma = (mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
+        gaussians.brdf_mlp.build_mips()
+        view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
+        d_viewdir_normalized = safe_normalize(view_pos - xyz)
+        normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
+        reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
+        iteration = 10000
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)
+                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, pc=gaussians, iteration=iteration)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]
@@ -94,6 +134,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
         torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
+        np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
