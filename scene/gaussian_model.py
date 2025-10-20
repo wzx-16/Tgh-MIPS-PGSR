@@ -107,9 +107,10 @@ class GaussianModel:
         self.setup_functions()
         self.opt_states = {}
         self.device = device
-        self.brdf_mlp = create_trainable_env_rnd(128, scale=0.0, bias=0.8)
+        self.brdf_mlp = create_trainable_env_rnd(256, scale=0.0, bias=0.8)
         self._specular = torch.empty(0, device=device)
         self._roughness = torch.empty(0, device=device)
+        self.default_roughness = 0.1
 
     def capture(self):
         if self.gaussian_dim == 3:
@@ -993,7 +994,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
-                roughness = torch.zeros((fused_point_cloud.shape[0], 1), device="cuda")
+                roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
@@ -1086,7 +1087,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                roughness = torch.zeros((fused_point_cloud.shape[0], 1), device=self.device)
+                roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
@@ -1178,7 +1179,7 @@ class GaussianModel:
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            roughness = torch.zeros((fused_point_cloud.shape[0], 1), device=self.device)
+                            roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
                     opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
@@ -1279,7 +1280,7 @@ class GaussianModel:
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    roughness = torch.zeros((fused_point_cloud.shape[0], 1), device=self.device)
+                    roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
                     
             #print("test1")
             opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
@@ -1467,11 +1468,22 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
+    def reset_diffuse(self):
+        diffuse_new = torch.zeros_like(self._features_dc)
+        optimizable_tensors = self.replace_tensor_to_optimizer(diffuse_new, "f_dc")
+        self._features_dc = optimizable_tensors["f_dc"]
+
     def reset_opacity_cpu(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         self._opacity = opacities_new
         self.opt_states["opacity"]["exp_avg"] = torch.zeros_like(self._opacity)
         self.opt_states["opacity"]["exp_avg_sq"] = torch.zeros_like(self._opacity)
+
+    def reset_diffuse_cpu(self):
+        diffuse_new = torch.zeros_like(self._features_dc)
+        self._features_dc = diffuse_new
+        self.opt_states["f_dc"]["exp_avg"] = torch.zeros_like(self._features_dc)
+        self.opt_states["f_dc"]["exp_avg_sq"] = torch.zeros_like(self._features_dc)
 
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}

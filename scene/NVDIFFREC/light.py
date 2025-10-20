@@ -122,10 +122,12 @@ class EnvironmentLight(torch.nn.Module):
             print("spec", spec.shape)
             specular_linear = spec * reflectance
 
-        diffuse_linear = torch.sigmoid(diffuse_raw - np.log(3.0))
+        #diffuse_linear = torch.sigmoid(diffuse_raw - np.log(3.0))
+        diffuse_linear = diff_col * torch.sigmoid(diffuse_raw - np.log(3.0))
 
         rgb = specular_linear + diffuse_linear
         #rgb = specular_linear
+        #rgb = diffuse_linear
 
         return rgb
 

@@ -27,7 +27,7 @@ class Scene:
     gaussians : GaussianModel
     tgh : TemperalGaussianHierarchy
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False, skip_render=False):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -98,8 +98,10 @@ class Scene:
             if env_map is not None:
                 self.gaussians.env_map = env_map.cuda()
             self.gaussians.active_sh_degree_t = active_sh_degree_t
-            cubemap_weights_path = os.path.join(self.model_path, "cubemap/iteration_14000/cubemap.pth")
+            cubemap_weights_path = os.path.join(self.model_path, "cubemap/iteration_10000/cubemap2.pth")
             self.gaussians.brdf_mlp = load_env(torch.load(cubemap_weights_path))
+        elif skip_render:
+            pass
         else:
             if self.loaded_iter:
                 self.gaussians.load_ply(os.path.join(self.model_path,
@@ -114,13 +116,13 @@ class Scene:
     def save(self, iteration, opt, tgh):
         #torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt1_" + str(iteration) + ".pth")
         #tgh.create_from_gaussians(gaussians)
-        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh_chkpnt" + str(iteration) + ".pth")
-        brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp/iteration_{iteration}/brdf_mlp.hdr")
+        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh2_chkpnt" + str(iteration) + ".pth")
+        brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp/iteration_{iteration}/brdf_mlp2.hdr")
         mkdir_p(os.path.dirname(brdf_mlp_path))
         save_env_map(brdf_mlp_path, self.gaussians.brdf_mlp)
         cubemap_path = os.path.join(self.model_path, "cubemap/iteration_{}".format(iteration))
         os.makedirs(cubemap_path, exist_ok=True)
-        torch.save(self.gaussians.brdf_mlp.base, os.path.join(cubemap_path, 'cubemap.pth'))
+        torch.save(self.gaussians.brdf_mlp.base, os.path.join(cubemap_path, 'cubemap2.pth'))
 
     def getTrainCameras(self, scale=1.0):
         return CameraDataset(self.train_cameras[scale].copy(), self.white_background)

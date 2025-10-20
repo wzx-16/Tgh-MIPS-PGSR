@@ -24,24 +24,28 @@ import math
 from torchvision import transforms
 from transformers import pipeline as pp
 import numpy as np
+from diffusers import DiffusionPipeline
 
 def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
-    predicted_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "predicted_depth")
+    predicted_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "predicted_depth_npy")
+    predicted_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "predicted_normal_npy")
     depth_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth_normal")
     rendered_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_normal")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_depth")
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     pipe.model.eval()
+    pipe_normal = DiffusionPipeline.from_pretrained("GonzaloMG/stable-diffusion-e2e-ft-normals",custom_pipeline="GonzaloMG/marigold-e2e-ft-normals",).to("cuda")
 
-    makedirs(render_path, exist_ok=True)
-    makedirs(gts_path, exist_ok=True)
+    #makedirs(render_path, exist_ok=True)
+    #makedirs(gts_path, exist_ok=True)
     makedirs(predicted_depth_path, exist_ok=True)
-    makedirs(depth_normal_path, exist_ok=True)
-    makedirs(rendered_normal_path, exist_ok=True)
-    makedirs(depth_path, exist_ok=True)
+    makedirs(predicted_normal_path, exist_ok=True)
+    #makedirs(depth_normal_path, exist_ok=True)
+    #makedirs(rendered_normal_path, exist_ok=True)
+    #makedirs(depth_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -88,80 +92,85 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #print(timestamp)
         #print(timestamp_first)
         print(viewpoint_cam.image_height, viewpoint_cam.image_width)
-        tgh.put_current_related_gaussians(timestamp, gaussians, True)
-        #gaussians._feature_rest = None
+        #tgh.put_current_related_gaussians(timestamp, gaussians, True)
         #timestamp = viewpoint_cam.timestamp
-        time_range = viewpoint_cam.timestamp - gaussians.get_t
+        #time_range = viewpoint_cam.timestamp - gaussians.get_t
         #time_range_offset = torch.abs(time_range) + 0.5
         # time_range2 = time_range_offset * time_range_offset
         # time_range3 = time_range_offset**2 * time_range
         # time_range2 = time_range**2
         # time_range3 = time_range**3
-        xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
+        #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
         #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)
         #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
         #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
-        mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-        opacity = gaussians.get_opacity * mt
-        shs = gaussians.get_features
-        #shs = None
-        ma = (mt > 0.05).squeeze()
-        print("active sh", gaussians.active_sh_degree)
-        gaussians.brdf_mlp.build_mips()
-        view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
-        d_viewdir_normalized = safe_normalize(view_pos - xyz)
-        normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
-        reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
-        iteration = 10000
-        render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, pc=gaussians, iteration=iteration)
+        #mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+        #opacity = gaussians.get_opacity * mt
+        #shs = gaussians.get_features
+        #ma = (mt > 0.05).squeeze()
+        #print("active sh", gaussians.active_sh_degree)
+        #gaussians.brdf_mlp.build_mips()
+        #view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
+        #d_viewdir_normalized = safe_normalize(view_pos - xyz)
+        #normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
+        #reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
+        #iteration = 20000
+        # render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
+        #                                             gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, pc=gaussians, iteration=iteration)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
-        rendering = render_package["render"]
-        depth_normal = (render_package["depth_normal"] + 1.0) / 2
-        rendered_normal = (render_package["rendered_normal"] + 1.0) / 2
-        render_depth = render_package["depth"]
+        # rendering = render_package["render"]
+        # depth_normal = (render_package["depth_normal"] + 1.0) / 2
+        # rendered_normal = (render_package["rendered_normal"] + 1.0) / 2
+        # render_depth = render_package["depth"]
         gt = view[0][0:3, :, :]
+
+        to_pil_image = transforms.ToPILImage()
+        gt_pil = to_pil_image(gt)
+        sgt_normal = pipe_normal(gt_pil)
+        predicted_normal = sgt_normal["prediction"]
 
         to_pil_image = transforms.ToPILImage()
         gt_pil = to_pil_image(gt)
         sgt_depth = pipe(gt_pil)
         predicted_depth = sgt_depth["predicted_depth"]
 
-        print("image size")
-        print(depth_normal.size(), gt.size())
-        torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
-        predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
-        torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
-        np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
-        render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
-        torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+        # print("image size")
+        # print(depth_normal.size(), gt.size())
+        # torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+        # torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
+        # torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, '{0:05d}'.format(idx) + ".png"))
+        # torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
+        # predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
+        # torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
+        print(os.path.join(predicted_normal_path, viewpoint_cam.image_path[-12:-4] + ".npy"))
+        np.save(os.path.join(predicted_depth_path, viewpoint_cam.image_path[-12:-4] + ".npy"), predicted_depth)
+        np.save(os.path.join(predicted_normal_path, viewpoint_cam.image_path[-12:-4] + ".npy"), predicted_normal)
+        # render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
+        # torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, skip_render:bool):
     with torch.no_grad():
-        tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
+        #tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
-        scene = Scene(dataset, gaussians, tgh, shuffle=False, render_only=True)
-        current_length = tgh.max_layer_length
-        point_cnt = 0
-        # for level in range(0, 10):
-        #     #segment_count = (math.ceil((10) / current_length)) + 1
-        #     segment_count = len(tgh.layers[level])
-        #     for ind in range(segment_count):
-        #         point_cnt += tgh.layers[level][ind]._xyz.shape[0]
-        #     current_length /= 2
-        # print("point count", point_cnt)
+        scene = Scene(dataset, gaussians, None, shuffle=False, render_only=True, skip_render=skip_render)
+        # current_length = tgh.max_layer_length
+        # point_cnt = 0
+        # # for level in range(0, 10):
+        # #     #segment_count = (math.ceil((10) / current_length)) + 1
+        # #     segment_count = len(tgh.layers[level])
+        # #     for ind in range(segment_count):
+        # #         point_cnt += tgh.layers[level][ind]._xyz.shape[0]
+        # #     current_length /= 2
+        # # print("point count", point_cnt)
         bg_color = [1,1,1] if dataset.white_background else [0, 0, 0]
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, tgh, pipeline, background)
+             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, None, pipeline, background)
 
-        if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, tgh, pipeline, background)
+        # if not skip_test:
+        #      render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, None, pipeline, background)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -172,10 +181,11 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--skip_render", action="store_true")
     args = get_combined_args(parser)
-    print("Rendering " + args.model_path)
+    #print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_render)

@@ -14,7 +14,7 @@ import os
 import random
 import torch
 from torch import nn
-from utils.loss_utils import get_img_grad_weight, get_img_grad_weight_grey, l1_loss, ssim, msssim
+from utils.loss_utils import get_img_grad_weight, get_img_grad_weight_grey, get_img_grad_weight_avg, l1_loss, ssim, msssim
 from gaussian_renderer import render, render_3d_pgsr_anti
 import sys
 from scene import Scene, GaussianModel, TemperalGaussianHierarchy
@@ -120,10 +120,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     #depth_guidance_checkpoint = "LiheYoung/depth-anything-base-hf"
-    pipe_depth = pipeline("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
-    pipe_depth.model.eval()
+    #pipe_depth = pipeline("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
+    #pipe_depth.model.eval()
 
-    pipe_normal = DiffusionPipeline.from_pretrained("GonzaloMG/stable-diffusion-e2e-ft-normals",custom_pipeline="GonzaloMG/marigold-e2e-ft-normals",).to("cuda")
+    #pipe_normal = DiffusionPipeline.from_pretrained("GonzaloMG/stable-diffusion-e2e-ft-normals",custom_pipeline="/root/autodl-tmp/projects/marigold-e2e-ft-normals/pipeline.py", trust_remote_code=True, local_files_only=True).to("cuda")
+    #pipe_normal = DiffusionPipeline.from_pretrained("GonzaloMG/stable-diffusion-e2e-ft-normals",custom_pipeline="GonzaloMG/marigold-e2e-ft-normals",).to("cuda")
     #pipe_normal = diffusers.MarigoldNormalsPipeline.from_pretrained("prs-eth/marigold-normals-v1-1", variant="fp16", torch_dtype=torch.float16).to("cuda")
     # vis = pipe_normal.image_processor.visualize_normals(normals.prediction, flip_x=False)
     # pipe_normal.eval()
@@ -167,7 +168,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             
             #start_t = time.time()
             for batch_idx in range(batch_size):
-                gt_image, loaded_mask, viewpoint_cam, n_gt = batch_data[batch_idx]
+                gt_image, loaded_mask, viewpoint_cam, n_gt, predicted_normal, predicted_depth = batch_data[batch_idx]
                 #gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 if gaussian_init_flag:
                     #cpu_to_cuda_start = time.time()
@@ -288,12 +289,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 loss = loss + 0.01 * lp.mean()
                 #print("loss 1", loss)
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
-                if iteration < 0:
+                if iteration < 20000:
                     with torch.no_grad():
-                        to_pil_image = transforms.ToPILImage()
-                        gt_pil = to_pil_image(gt_image)
-                        sgt_depth = pipe_depth(gt_pil)
-                        predicted_depth = sgt_depth["predicted_depth"].cuda()
+                        # to_pil_image = transforms.ToPILImage()
+                        # gt_pil = to_pil_image(gt_image)
+                        # sgt_depth = pipe_depth(gt_pil)
+                        # predicted_depth = sgt_depth["predicted_depth"].cuda()
+                        predicted_depth = torch.from_numpy(predicted_depth).cuda()
                         #print("predicted depth", predicted_depth.shape)
                     avg_diff_pred = torch.mean(torch.abs(predicted_depth - predicted_depth.median()))
                     depth_norm = (predicted_depth - predicted_depth.median()) / avg_diff_pred
@@ -301,12 +303,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print("render depth", render_depth.shape)
                     avg_diff_render = torch.mean(torch.abs(render_depth - render_depth.median()))
                     render_depth_norm = (render_depth - render_depth.median()) / avg_diff_render
-                    if iteration < 2000:
+                    depth_grad = (1 - get_img_grad_weight_grey(predicted_depth)).detach()
+                    if iteration < 1000:
                         pass
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
-                    elif iteration < 6000:
-                        loss += 0.01 * (weight_conf * torch.abs((depth_norm + render_depth_norm))).mean()
+                    elif iteration < 10000:
+                        loss += 0.1 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
+                    elif iteration < 15000:
+                        loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
+                    elif iteration < 20000:
+                        loss += 0.1 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     if iteration % 100 == 1:
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
@@ -315,14 +322,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 if iteration < 20000:
                     with torch.no_grad():
-                        to_pil_image = transforms.ToPILImage()
-                        gt_pil = to_pil_image(gt_image)
-                        sgt_normal = pipe_normal(gt_pil)
+                        # to_pil_image = transforms.ToPILImage()
+                        # gt_pil = to_pil_image(gt_image)
+                        # sgt_normal = pipe_normal(gt_pil)
                         #image_test = diffusers.utils.load_image("https://gonzalomartingarcia.github.io/diffusion-e2e-ft/static/lego.jpg")
                         #normal_test = pipe_normal(image_test)
                         #pipe_normal.image_processor.visualize_normals(normal_test.prediction)[0].save("normals.png")
                         #print("sgt_normal", sgt_normal["prediction"].shape)
-                        predicted_normal = torch.from_numpy(sgt_normal["prediction"]).permute(0,3,1,2).squeeze(0).cuda()
+                        predicted_normal = torch.from_numpy(predicted_normal).permute(0,3,1,2).squeeze(0).cuda()
                         #predicted_normal = predicted_normal.reshape(3, -1)
                         #_, H, W = gt_image.shape
                         #pred_normal_rot = (torch.from_numpy(viewpoint_cam.R).to(torch.float32).cuda() @ predicted_normal).reshape(3, H, W)
@@ -338,22 +345,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     render_normal_norm = torch.nn.functional.normalize(render_normal, dim=0, eps=1e-6)
                     # print("render normal", render_normal_norm.shape)
                     # print("predict normal", normal_norm.shape)
-                    normal_grad = get_img_grad_weight(normal_norm)
-                    render_normal_grad = get_img_grad_weight(render_normal_norm)
-                    with torch.no_grad():
-                        to_pil_image = transforms.ToPILImage()
-                        gt_pil = to_pil_image(gt_image)
-                        sgt_depth = pipe_depth(gt_pil)
-                        predicted_depth = sgt_depth["predicted_depth"].cuda()
+                    normal_grad = get_img_grad_weight_avg(normal_norm)
+                    render_normal_grad = get_img_grad_weight_avg(render_normal_norm)
+                    #print("normal grad", normal_grad.shape)
+                    #print("render normal grad", render_normal_grad.shape)
+                    # with torch.no_grad():
+                    #     to_pil_image = transforms.ToPILImage()
+                    #     gt_pil = to_pil_image(gt_image)
+                    #     sgt_depth = pipe_depth(gt_pil)
+                    #     predicted_depth = sgt_depth["predicted_depth"].cuda()
                     #print("depth size", predicted_depth.shape)
-                    depth_grad = get_img_grad_weight_grey(predicted_depth)
-                    if iteration < 3000:
+                    #depth_grad = get_img_grad_weight_grey(predicted_depth)
+                    #print("depth grad", depth_grad.shape)
+                    if iteration < 1000:
                         pass
-                    elif iteration < 8000:
+                    elif iteration < 5000:
                         loss += 0.01 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     elif iteration < 20000:
-                        loss += 0.005 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
-                        loss += 0.015 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
+                        loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                        loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
                     if iteration % 100 == 1:
                     #predicted_normal_image = (predicted_normal - predicted_normal.min()) / (predicted_normal.max() - predicted_normal.min())
                     #render_normal_image = (render_normal - render_normal.min()) / (render_normal.max() - render_normal.min())
@@ -458,12 +468,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #loss += 0.1 * ((velocity_norm2 + velocity_norm3) / (velocity_norm + 1e-6)).mean()
 
                 # single-view loss
-                if iteration > 3000:
-                    weight = 0.015
+                if iteration > 2000:
+                    weight = 0.5
                     normal = render_pkg["rendered_normal"]
                     depth_normal = render_pkg["depth_normal"]
                     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-20)
                     depth_normal = torch.nn.functional.normalize(depth_normal, dim=0, eps=1e-20)
+                    #normal_grad = get_img_grad_weight_avg(normal)
+                    depth_normal_grad = get_img_grad_weight_avg(depth_normal)
                     
                     if n_gt is not None:
                         n_gt = n_gt.cuda()
@@ -490,17 +502,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
                         #normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-                        normal_loss = weight * (1 - ((depth_normal * normal).sum(dim=0))).mean()
+                        normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
+                        #normal_grad_loss = 0.01 * (depth_grad * ((render_normal_grad.detach() - depth_normal_grad).abs().sum(dim=0))).mean()
                         #pass
                     else:
                         normal_loss = weight * (((depth_normal - normal)).abs().sum(0)).mean()
                     loss += (normal_loss)# + (((normal_image - normal)).abs().sum(0)).mean()
+                    #loss += normal_grad_loss
                     loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
-                    if iteration <= 10000:
-                        loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.1
+                    if iteration <= 5000:
+                        loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5
                     else:
                         loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5
-                
+                        #loss += normal_grad_loss
+
                 loss = loss / batch_size
                 loss.backward()
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
@@ -596,6 +611,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #if iteration % 100 == 0:
                         gaussians.reset_opacity()
                         tgh.reset_opacity()
+                        
+                if iteration % 8000 == 0:
+                    tgh.reset_diffuse()
+                    gaussians.reset_diffuse()
                         
                 # Optimizer step
                 if iteration < opt.iterations:

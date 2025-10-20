@@ -190,6 +190,17 @@ class TemperalGaussianHierarchy():
             current_length = current_length * 2
             
         self.layers[0][0].reset_opacity_cpu()
+    
+    def reset_diffuse(self):
+        current_length = self.min_layer_length
+        for level in range(self.level_count, 0, -1):
+            segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
+            for ind in range(segment_count):
+                self.layers[level][ind].reset_diffuse_cpu()
+
+            current_length = current_length * 2
+            
+        self.layers[0][0].reset_diffuse_cpu()
 
     def update_to_gaussians(self, gaussians : GaussianModel, opt, new_gaussians : GaussianModel, o_th : float = 0.05):
         # mean_t, cov_t = gaussians.get_current_cov_and_mean_t()
@@ -354,21 +365,21 @@ class TemperalGaussianHierarchy():
             gaussians._specular,
             gaussians._roughness
             ) = t
-        gaussians._xyz = gaussians._xyz.cuda()
-        gaussians._features_dc = gaussians._features_dc.cuda()
-        gaussians._features_rest = gaussians._features_rest.cuda()
-        gaussians._scaling = gaussians._scaling.cuda()
-        gaussians._rotation = gaussians._rotation.cuda()
-        gaussians._opacity = gaussians._opacity.cuda()
-        gaussians.max_radii2D = gaussians.max_radii2D.cuda()
-        gaussians._t = gaussians._t.cuda()
-        gaussians._scaling_t = gaussians._scaling_t.cuda()
-        gaussians._velocity = gaussians._velocity.cuda()
-        gaussians._velocity2 = gaussians._velocity2.cuda()
-        gaussians._velocity3 = gaussians._velocity3.cuda()
-        gaussians._rot_velocity = gaussians._rot_velocity.cuda()
-        gaussians._specular = gaussians._specular.cuda()
-        gaussians._roughness = gaussians._roughness.cuda()
+        # gaussians._xyz = gaussians._xyz.cuda()
+        # gaussians._features_dc = gaussians._features_dc.cuda()
+        # gaussians._features_rest = gaussians._features_rest.cuda()
+        # gaussians._scaling = gaussians._scaling.cuda()
+        # gaussians._rotation = gaussians._rotation.cuda()
+        # gaussians._opacity = gaussians._opacity.cuda()
+        # gaussians.max_radii2D = gaussians.max_radii2D.cuda()
+        # gaussians._t = gaussians._t.cuda()
+        # gaussians._scaling_t = gaussians._scaling_t.cuda()
+        # gaussians._velocity = gaussians._velocity.cuda()
+        # gaussians._velocity2 = gaussians._velocity2.cuda()
+        # gaussians._velocity3 = gaussians._velocity3.cuda()
+        # gaussians._rot_velocity = gaussians._rot_velocity.cuda()
+        # gaussians._specular = gaussians._specular.cuda()
+        # gaussians._roughness = gaussians._roughness.cuda()
 
     def capture(self, gaussians : GaussianModel, opt):
         # static_layer = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)

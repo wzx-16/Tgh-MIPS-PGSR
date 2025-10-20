@@ -42,6 +42,22 @@ class CameraDataset(Dataset):
             # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)).unsqueeze(0) / 255.0
             loaded_mask = None
 
+            normal_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_normal", viewpoint_cam.image_name + ".npy"))
+            #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+            if os.path.exists(normal_path):
+                normal = np.load(normal_path)
+            else:
+                normal = None
+            #normal = None
+
+            depth_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_depth", viewpoint_cam.image_name + ".npy"))
+            #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+            if os.path.exists(depth_path):
+                depth = np.load(depth_path)
+            else:
+                depth = None
+            #depth = None
+
             # pals = os.path.split(viewpoint_cam.image_path)
             # pa = '/media/bbnc/Elements/test/normal/' + pals[-1][3:7] + '/' + pals[-1].replace('jpg', 'png')
             # # pa_mask = '/media/bbnc/Elements/test/human_masks/' + pals[-1][3:7] + '/' + pals[-1].replace('jpg', 'png')
@@ -59,7 +75,7 @@ class CameraDataset(Dataset):
         else:
             viewpoint_image = viewpoint_cam.image
             
-        return viewpoint_image, loaded_mask, viewpoint_cam, rr
+        return viewpoint_image, loaded_mask, viewpoint_cam, rr, normal, depth
     
     def __len__(self):
         return len(self.viewpoint_stack)

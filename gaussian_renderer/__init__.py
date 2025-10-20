@@ -463,12 +463,12 @@ def render_3d_pgsr_anti(
     diffuse   = pc.get_diffuse
     specular  = pc.get_specular
     roughness = pc.get_roughness
-    if iteration > 10000:
+    if iteration > 5000:
         color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...])
         shs = None
         colors_precomp = color.squeeze() 
     elif iteration < 0:
-        color = torch.sigmoid(diffuse - np.log(3.0))
+        color = (1 - specular) * torch.sigmoid(diffuse - np.log(3.0))
         colors_precomp = color.squeeze() 
         shs = None
     else:
