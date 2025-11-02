@@ -111,8 +111,9 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
         d_viewdir_normalized = safe_normalize(view_pos - xyz)
         normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
+        normal = normal + gaussians.get_delta_normal
         reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
-        iteration = 10000
+        iteration = 30000
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
                                                     gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, pc=gaussians, iteration=iteration)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 

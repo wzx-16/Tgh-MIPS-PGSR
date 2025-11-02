@@ -84,7 +84,7 @@ class EnvironmentLight(torch.nn.Module):
         return torch.mean(torch.abs(self.base - white))
 
 
-    def shade(self, gb_pos, gb_normal, d_reflvec, kd, ks, kr, view_pos, specular=True):
+    def shade(self, gb_pos, gb_normal, d_reflvec, kd, ks, kr, view_pos, iteration, specular=True):
         # (H, W, N, C)
         wo = util.safe_normalize(view_pos - gb_pos)
 
@@ -122,8 +122,11 @@ class EnvironmentLight(torch.nn.Module):
             print("spec", spec.shape)
             specular_linear = spec * reflectance
 
-        #diffuse_linear = torch.sigmoid(diffuse_raw - np.log(3.0))
-        diffuse_linear = diff_col * torch.sigmoid(diffuse_raw - np.log(3.0))
+        if iteration > 10000:
+            diffuse_linear = torch.sigmoid(diffuse_raw - np.log(3.0))
+        else:
+            #diffuse_linear = diff_col * torch.sigmoid(diffuse_raw - np.log(3.0))
+            diffuse_linear = torch.sigmoid(diffuse_raw - np.log(3.0))
 
         rgb = specular_linear + diffuse_linear
         #rgb = specular_linear

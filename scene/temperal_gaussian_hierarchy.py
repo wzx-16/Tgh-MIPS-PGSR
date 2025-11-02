@@ -363,6 +363,7 @@ class TemperalGaussianHierarchy():
             gaussians._velocity3,
             gaussians._rot_velocity,
             gaussians._specular,
+            gaussians._delta_normal,
             gaussians._roughness
             ) = t
         # gaussians._xyz = gaussians._xyz.cuda()
@@ -480,6 +481,7 @@ class TemperalGaussianHierarchy():
             gaussians._velocity3,
             gaussians._rot_velocity,
             gaussians._specular,
+            gaussians._delta_normal,
             gaussians._roughness
             #gaussians._rotation_r
         )

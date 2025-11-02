@@ -94,6 +94,7 @@ class OptimizationParams(ParamGroup):
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
         self.specular_lr = 0.0002
+        self.delta_normal_lr = 0.001
         self.roughness_lr = 0.0002
         self.percent_dense = 0.01
         self.lambda_dssim = 0.2
