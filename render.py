@@ -32,9 +32,9 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     depth_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth_normal")
     rendered_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_normal")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_depth")
-    depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
-    pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
-    pipe.model.eval()
+    # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
+    # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
+    # pipe.model.eval()
 
     makedirs(render_path, exist_ok=True)
     makedirs(gts_path, exist_ok=True)
@@ -107,15 +107,17 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #shs = None
         ma = (mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
-        gaussians.brdf_mlp.build_mips()
+        #gaussians.brdf_mlp.build_mips()
         view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
         d_viewdir_normalized = safe_normalize(view_pos - xyz)
         normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
         normal = normal + gaussians.get_delta_normal
         reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
-        iteration = 30000
+        dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
+        dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+        iteration = 20000
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, pc=gaussians, iteration=iteration)
+                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]
@@ -124,10 +126,10 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         render_depth = render_package["depth"]
         gt = view[0][0:3, :, :]
 
-        to_pil_image = transforms.ToPILImage()
-        gt_pil = to_pil_image(gt)
-        sgt_depth = pipe(gt_pil)
-        predicted_depth = sgt_depth["predicted_depth"]
+        # to_pil_image = transforms.ToPILImage()
+        # gt_pil = to_pil_image(gt)
+        # sgt_depth = pipe(gt_pil)
+        # predicted_depth = sgt_depth["predicted_depth"]
 
         print("image size")
         print(depth_normal.size(), gt.size())
@@ -135,9 +137,9 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
-        predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
-        torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
-        np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
+        #predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
+        #torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
+        #np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 

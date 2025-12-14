@@ -19,6 +19,7 @@ from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 from utils.transformation_util import matrix_to_quaternion, quaternion_to_matrix
 from utils.graphics_utils import focal2fov, getProjectionMatrix, normal_from_depth_image
+from utils.color_utils import linear2srgb
 import numpy as np
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
@@ -400,6 +401,7 @@ def render_3d_pgsr_anti(
     max_sh_channels=0,
     normal = None,
     reflect = None,
+    dir_pp = None,
     pc: GaussianModel = None,
     iteration = 0,
 ):
@@ -460,11 +462,17 @@ def render_3d_pgsr_anti(
 
     xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / (pc.get_sigma_t + 1)
     view_pos = viewpoint_camera.camera_center
-    diffuse   = pc.get_diffuse
+    diffuse   = pc.get_diffuse(dir_pp)
+    #diffuse   = torch.logit(pc.get_diffuse.clamp(0 + 1e-6, 1 - 1e-6)) + 1.098612
     specular  = pc.get_specular
+    #specular2 = pc.get_specular2
     roughness = pc.get_roughness
-    if iteration > 700:
+    if iteration >= 5000:
         color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
+        #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
+        #color = color + color2
+        #color = diffuse
+        color = linear2srgb(color)
         shs = None
         colors_precomp = color.squeeze() 
     elif iteration < 0:

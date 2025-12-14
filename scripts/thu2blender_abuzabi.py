@@ -268,7 +268,7 @@ if __name__ == '__main__':
                        'cy': Ks[i][1, 2],
                        'transform_matrix': poses[i].tolist(),
                        'time': int(im.lstrip("/").split('.')[0][-4:]) / 30.} for im in images if cams[i] == im[7:14]]
-        if i == 0:
+        if i == 25:
             test_frames += cam_frames
         else:
             train_frames += cam_frames

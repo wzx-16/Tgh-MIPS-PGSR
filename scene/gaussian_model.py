@@ -108,7 +108,9 @@ class GaussianModel:
         self.opt_states = {}
         self.device = device
         self.brdf_mlp = create_trainable_env_rnd(256, scale=0.0, bias=0.8)
+        #self.brdf_mlp_2 = create_trainable_env_rnd(128, scale=0.0, bias=0.8)
         self._specular = torch.empty(0, device=device)
+        self._specular2 = torch.empty(0, device=device)
         self._roughness = torch.empty(0, device=device)
         self._delta_normal = torch.empty(0, device=device)
         self.default_roughness = 0.6
@@ -153,6 +155,7 @@ class GaussianModel:
                 self._velocity3,
                 self._rot_velocity,
                 self._specular,
+                self._specular2,
                 self._delta_normal,
                 self.roughness,
                 self.rot_4d,
@@ -197,6 +200,7 @@ class GaussianModel:
             self._velocity3,
             self._rot_velocity,
             self._specular,
+            self._specular2,
             self._delta_normal,
             self.roughness,
             self.rot_4d,
@@ -236,6 +240,7 @@ class GaussianModel:
             self._velocity3 = gaussians._velocity3[mask].to(self.device)
             self._rot_velocity = gaussians._rot_velocity[mask].to(self.device)
             self._specular = gaussians._specular[mask].to(self.devices)
+            self._specular2 = gaussians._specular2[mask].to(self.devices)
             self._delta_normal = gaussians._delta_normal[mask].to(self.devices)
             self._roughness = gaussians._roughness[mask].to(self.devices)
 
@@ -283,6 +288,7 @@ class GaussianModel:
             new_gaussians._velocity3 = torch.cat([new_gaussians._velocity3, gaussians._velocity3[mask].to(self.device)])
             new_gaussians._rot_velocity = torch.cat([new_gaussians._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
             new_gaussians._specular = torch.cat([new_gaussians._specular, gaussians._specular[mask].to(self.device)])
+            new_gaussians._specular2 = torch.cat([new_gaussians._specular2, gaussians._specular2[mask].to(self.device)])
             new_gaussians._delta_normal = torch.cat([new_gaussians._delta_normal, gaussians._delta_normal[mask].to(self.device)])
 
             # new_gaussians._xyz = gaussians._xyz[mask].to(self.device)
@@ -390,6 +396,11 @@ class GaussianModel:
             specular_list.append(segment._specular.cuda())
         self._specular = nn.Parameter(torch.cat(specular_list))
 
+        specular2_list = []
+        for segment in gaussians_segments:
+            specular2_list.append(segment._specular2.cuda())
+        self._specular2 = nn.Parameter(torch.cat(specular2_list))
+
         delta_normal_list = []
         for segment in gaussians_segments:
             delta_normal_list.append(segment._delta_normal.cuda())
@@ -466,6 +477,7 @@ class GaussianModel:
         self._velocity3 = torch.empty(0, 3, device=self.device)
         self._rot_velocity = torch.empty(0, 4, device=self.device)
         self._specular = torch.empty(0, 3, device=self.device)
+        self._specular2 = torch.empty(0, 3, device=self.device)
         self._delta_normal = torch.empty(0, 3, device=self.device)
         self._roughness = torch.empty(0, 1, device=self.device)
 
@@ -634,6 +646,10 @@ class GaussianModel:
             state_dict["specular"] = self.optimizer.state[self._specular]
             del self.optimizer.state[self._specular]
 
+        if self._specular2 in self.optimizer.state:
+            state_dict["specular2"] = self.optimizer.state[self._specular2]
+            del self.optimizer.state[self._specular2]
+
         if self._delta_normal in self.optimizer.state:
             state_dict["delta_normal"] = self.optimizer.state[self._delta_normal]
             del self.optimizer.state[self._delta_normal]
@@ -685,6 +701,8 @@ class GaussianModel:
                 group["params"][0] = self._rot_velocity
             if group["name"] == "specular":
                 group["params"][0] = self._specular
+            if group["name"] == "specular2":
+                group["params"][0] = self._specular2
             if group["name"] == "delta_normal":
                 group["params"][0] = self._delta_normal
             if group["name"] == "roughness":
@@ -717,6 +735,8 @@ class GaussianModel:
             return self._rot_velocity
         if group_name == "specular":
             return self._specular
+        if group_name == "specular2":
+            return self._specular2
         if group_name == "delta_normal":
             return self._delta_normal
         if group_name == "roughness":
@@ -745,6 +765,7 @@ class GaussianModel:
             self._velocity3 = torch.cat([self._velocity3, gaussians._velocity3[mask].to(self.device)])
             self._rot_velocity = torch.cat([self._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
             self._specular = torch.cat([self._specular, gaussians._specular[mask].to(self.device)])
+            self._specular2 = torch.cat([self._specular2, gaussians._specular2[mask].to(self.device)])
             self._delta_normal = torch.cat([self._delta_normal, gaussians._delta_normal[mask].to(self.device)])
             self._roughness = torch.cat([self._roughness, gaussians._roughness[mask].to(self.device)])
             # if gaussians.env_map is not None:
@@ -792,6 +813,7 @@ class GaussianModel:
             new_gaussians._velocity3 = torch.cat([new_gaussians._velocity3, self._velocity3, gaussians._velocity3[mask].to(self.device)])
             new_gaussians._rot_velocity = torch.cat([new_gaussians._rot_velocity, self._rot_velocity, gaussians._rot_velocity[mask].to(self.device)])
             new_gaussians._specular = torch.cat([new_gaussians._specular, self._specular, gaussians._specular[mask].to(self.device)])
+            new_gaussians._specular2 = torch.cat([new_gaussians._specular2, self._specular2, gaussians._specular2[mask].to(self.device)])
             new_gaussians._delta_normal = torch.cat([new_gaussians._delta_normal, self._delta_normal, gaussians._delta_normal[mask].to(self.device)])
             new_gaussians._roughness = torch.cat([new_gaussians._roughness, self._roughness, gaussians._roughness[mask].to(self.device)])
             # if gaussians.env_map is not None:
@@ -833,6 +855,7 @@ class GaussianModel:
         self._velocity3 = nn.Parameter(torch.cat([self._velocity3, gaussians._velocity3.cuda()]))
         self._rot_velocity = nn.Parameter(torch.cat([self._rot_velocity, gaussians._rot_velocity.cuda()]))
         self._specular = nn.Parameter(torch.cat([self._specular, gaussians._specular.cuda()]))
+        self._specular2 = nn.Parameter(torch.cat([self._specular2, gaussians._specular2.cuda()]))
         self._delta_normal = nn.Parameter(torch.cat([self._delta_normal, gaussians._delta_normal.cuda()]))
         self._roughness = nn.Parameter(torch.cat([self._roughness, gaussians._roughness.cuda()]))
         # if gaussians.env_map is not None:
@@ -881,6 +904,30 @@ class GaussianModel:
                 #previous_state["step"] = step_dict[k][0]
                 previous_state["exp_avg"] = torch.cat(exp_avg_dict[k])
                 previous_state["exp_avg_sq"] = torch.cat(exp_avg_sq_dict[k])
+                self.optimizer.state[attr] = previous_state
+
+    def append_state_from_gaussians_cpu(self, gaussians_segments, state_dict):
+        step_dict = {}
+        exp_avg_dict = {}
+        exp_avg_sq_dict = {}
+        for segment in gaussians_segments:
+            for k,v in segment.opt_states.items():
+                if k not in step_dict:
+                    step_dict[k] = []
+                if k not in exp_avg_dict:
+                    exp_avg_dict[k] = []
+                if k not in exp_avg_sq_dict:
+                    exp_avg_sq_dict[k] = []
+                step_dict[k].append(v["step"].cuda())
+                exp_avg_dict[k].append(v["exp_avg"].cuda())
+                exp_avg_sq_dict[k].append(v["exp_avg_sq"].cuda())
+        for k,v in gaussians_segments[0].opt_states.items():
+            attr = self.get_param_group_corresponding_attr(k)
+            if k in state_dict:
+                previous_state = state_dict[k]
+                #previous_state["step"] = step_dict[k][0]
+                previous_state["exp_avg"] = torch.cat([previous_state["exp_avg"], torch.cat(exp_avg_dict[k])])
+                previous_state["exp_avg_sq"] = torch.cat([previous_state["exp_avg_sq"], torch.cat(exp_avg_sq_dict[k])])
                 self.optimizer.state[attr] = previous_state
                 
     def clone_opt_states_from_gaussians_cpu(self, gaussians_segments):
@@ -934,6 +981,10 @@ class GaussianModel:
     @property
     def get_specular(self):
         return self.specular_activation(self._specular)
+
+    @property
+    def get_specular2(self):
+        return self.specular_activation(self._specular2)
     
     @property
     def get_delta_normal(self):
@@ -974,9 +1025,10 @@ class GaussianModel:
         elif self.gaussian_dim == 4 and self.max_sh_degree_t > 0:
             return (self.max_sh_degree+1)**2 * (self.max_sh_degree_t + 1)
     
-    @property
-    def get_diffuse(self):
-        return eval_sh(0, self._features_dc.transpose(1, 2), None)
+    def get_diffuse(self, dir):
+        #return eval_sh(0, self._features_dc.transpose(1, 2), None)
+
+        return eval_sh(2, self.get_features.transpose(1, 2), dir)
     
     def get_marginal_t(self, timestamp, scaling_modifier = 1): # Standard
         sigma = self.get_sigma_t * scaling_modifier ** 2
@@ -1020,6 +1072,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
+                specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
@@ -1042,6 +1095,7 @@ class GaussianModel:
                 self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
                 self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
                 self._specular = nn.Parameter(specular.requires_grad_(True))
+                self._specular2 = nn.Parameter(specular2.requires_grad_(True))
                 self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
                 self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
@@ -1115,6 +1169,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1137,6 +1192,7 @@ class GaussianModel:
                 self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
                 self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
                 self._specular = nn.Parameter(specular.requires_grad_(True))
+                self._specular2 = nn.Parameter(specular2.requires_grad_(True))
                 self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
                 self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
@@ -1152,14 +1208,14 @@ class GaussianModel:
         with torch.no_grad():
         # pcd_list = ['points.ply' for _ in range(640)]
             for ii, pcd_path in enumerate(pcd_list[:]):
-                if ii < 1:
+                if ii < 0:
                 
                 #if ii < 80 and ii >= 60:
                 #if ii < 10:
             
                     # if ii % 30 != 0:
                     #     continue
-                    timestamp = (ii + 1) / fps
+                    timestamp = (ii) / fps
                     # timestamp = ii / fps
                     if time_duration is not None:
                         if timestamp < time_duration[0]:
@@ -1209,6 +1265,7 @@ class GaussianModel:
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                            specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1230,6 +1287,7 @@ class GaussianModel:
                             self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
                             self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
                             self._specular = nn.Parameter(specular.requires_grad_(True))
+                            self._specular2 = nn.Parameter(specular2.requires_grad_(True))
                             self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
                             self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
@@ -1270,13 +1328,13 @@ class GaussianModel:
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
-        if pcd.points.shape[0] > 100:
-            mask = np.random.randint(0, pcd.points.shape[0], 100)
+        if pcd.points.shape[0] > 500000:
+            mask = np.random.randint(0, pcd.points.shape[0], 500000)
             xyz = pcd.points[mask]
             rgb = pcd.colors[mask]
             normals = pcd.normals[mask]
 
-            pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=timestamp)
+            pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=None)
         
         fused_point_cloud = torch.tensor(np.asarray(pcd.points), device=self.device, dtype=torch.float)
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors), device=self.device, dtype=torch.float))
@@ -1303,7 +1361,7 @@ class GaussianModel:
             if self.gaussian_dim == 4:
                 # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
-                dist_t = (torch.zeros_like(fused_times, device=self.device) + 10) / 1
+                dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
                 # scales_t = torch.log(torch.sqrt(dist_t))
                 scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
                 if self.rot_4d:
@@ -1312,6 +1370,7 @@ class GaussianModel:
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                    specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
                     
@@ -1335,6 +1394,7 @@ class GaussianModel:
                     _velocity3 = velocity3
                     _rot_velocity = rot_velocity
                     _specular = specular
+                    _specular2 = specular2
                     _delta_normal = delta_normal
                     _roughness = roughness
 
@@ -1358,6 +1418,7 @@ class GaussianModel:
                 self._velocity3 = nn.Parameter(_velocity3.requires_grad_(True))
                 self._rot_velocity = nn.Parameter(_rot_velocity.requires_grad_(True))
                 self._specular = nn.Parameter(_specular.requires_grad_(True))
+                self._specular2 = nn.Parameter(_specular2.requires_grad_(True))
                 self._delta_normal = nn.Parameter(_delta_normal.requires_grad_(True))
                 self._roughness = nn.Parameter(_roughness.requires_grad_(True))
         # print(self.get_cov_t())
@@ -1401,6 +1462,7 @@ class GaussianModel:
         velocity3 = init_4d_gaussian['velocity3'].cuda()
         rot_velocity = init_4d_gaussian['rot_velocity'].cuda()
         specular = init_4d_gaussian['specular'].cuda()
+        specular2 = init_4d_gaussian['specular2'].cuda()
         delta_normal = init_4d_gaussian['delta_normal'].cuda()
         roughness = init_4d_gaussian['roughness'].cuda()
 
@@ -1421,6 +1483,7 @@ class GaussianModel:
         self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
         self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
         self._specular = nn.Parameter(specular.requires_grad_(True))
+        self._specular2 = nn.Parameter(specular2.requires_grad_(True))
         self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
         self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
@@ -1450,6 +1513,7 @@ class GaussianModel:
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.specular_lr, "name": "specular"})
+                l.append({'params': [self._specular2], 'lr': training_args.specular_lr, "name": "specular2"})
                 l.append({'params': [self._delta_normal], 'lr': training_args.delta_normal_lr, "name": "delta_normal"})
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
                 l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
@@ -1508,6 +1572,7 @@ class GaussianModel:
 
     def reset_diffuse(self):
         mask = self.get_specular.mean(dim=-1) < 0.8
+        #mask2 = self.get_specular2.mean(dim=-1) < 0.8
         diffuse_new = torch.zeros_like(self._features_dc)
         diffuse_new[mask] = self._features_dc[mask]
         optimizable_tensors = self.replace_tensor_to_optimizer(diffuse_new, "f_dc")
@@ -1587,6 +1652,7 @@ class GaussianModel:
                 self._velocity3 = optimizable_tensors['velocity3']
                 self._rot_velocity = optimizable_tensors['rot_velocity']
                 self._specular = optimizable_tensors['specular']
+                self._specular2 = optimizable_tensors['specular2']
                 self._delta_normal = optimizable_tensors['delta_normal']
                 self._roughness = optimizable_tensors['roughness']
             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
@@ -1615,7 +1681,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_delta_normal, new_roughness):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -1632,6 +1698,7 @@ class GaussianModel:
                 d["velocity3"] = new_velocity3
                 d["rot_velocity"] = new_rot_velocity
                 d["specular"] = new_specular
+                d["specular2"] = new_specular2
                 d["delta_normal"] = new_delta_normal
                 d["roughness"] = new_roughness
 
@@ -1651,6 +1718,7 @@ class GaussianModel:
                 self._velocity3 = optimizable_tensors['velocity3']
                 self._rot_velocity = optimizable_tensors['rot_velocity']
                 self._specular = optimizable_tensors['specular']
+                self._specular2 = optimizable_tensors['specular2']
                 self._delta_normal = optimizable_tensors['delta_normal']
                 self._roughness = optimizable_tensors['roughness']
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -1689,6 +1757,7 @@ class GaussianModel:
             new_velocity3 = None
             new_rot_velocity = None
             new_specular = None
+            new_specular2 = None
             new_delta_normal = None
             new_roughness = None
             if self.gaussian_dim == 4:
@@ -1714,6 +1783,7 @@ class GaussianModel:
             new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
             new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
             new_specular = self._specular[selected_pts_mask].repeat(N,1)
+            new_specular2 = self._specular2[selected_pts_mask].repeat(N,1)
             new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
             new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
             #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
@@ -1722,7 +1792,7 @@ class GaussianModel:
             # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
             #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_delta_normal, new_roughness)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -1747,6 +1817,7 @@ class GaussianModel:
         new_velocity3 = None
         new_rot_velocity = None
         new_specular = None
+        new_specular2 = None
         new_delta_normal = None
         new_roughness = None
         if self.gaussian_dim == 4:
@@ -1759,6 +1830,7 @@ class GaussianModel:
                 new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask])
                 new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask])
                 new_specular = self._specular[selected_pts_mask]
+                new_specular2 = self._specular2[selected_pts_mask]
                 new_delta_normal = self._delta_normal[selected_pts_mask]
                 new_roughness = self._roughness[selected_pts_mask]
                 new_velocity = self._velocity[selected_pts_mask]
@@ -1766,7 +1838,7 @@ class GaussianModel:
                 # new_velocity3 = self._velocity3[selected_pts_mask]
                 # new_rot_velocity = self._rot_velocity[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_delta_normal, new_roughness)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_t=None, prune_only=False):
         if not prune_only:

@@ -8,7 +8,7 @@ batch_size: 1
 exhaust_test: True
 
 ModelParams:
-  sh_degree: 3
+  sh_degree: 2
   source_path: "data/N3V/abuzabi"
   model_path: "output/N3V/abuzabi"
   images: "images"
@@ -32,16 +32,16 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 30_000
+  iterations: 20_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000016
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 30_000
+  position_lr_max_steps: 20_000
   brdf_mlp_lr_init : 0.016
   brdf_mlp_lr_final : 0.00016
   brdf_mlp_lr_delay_mult : 0.01
-  brdf_mlp_lr_max_steps : 30_000
+  brdf_mlp_lr_max_steps : 20_000
   feature_lr: 0.0025
   opacity_lr: 0.05
   scaling_lr: 0.005
@@ -53,9 +53,9 @@ OptimizationParams:
   lambda_dssim: 0.2
   thresh_opa_prune: 0.005
   densification_interval: 200
-  opacity_reset_interval: 5000
+  opacity_reset_interval: 10000
   densify_from_iter: 500
-  densify_until_iter: 1_5000
+  densify_until_iter: 10_000
   densify_grad_threshold: 0.0001
   densify_grad_t_threshold: 0.0002 / 40 # 想办法用上
   densify_until_num_points: -1
