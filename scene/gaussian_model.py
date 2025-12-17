@@ -25,6 +25,56 @@ from utils.sh_utils import sh_channels_4d, eval_sh
 from utils.transformation_util import quaternion_to_matrix
 import gc
 from scene.NVDIFFREC import create_trainable_env_rnd
+import nvdiffrast.torch
+
+class SphMipEncoding(nn.Module):
+    def __init__(
+        self,
+        n_levels: int = 8,
+        plane_size: int = 512,
+        feature_dim: int = 16,
+        Sn: int = 1,
+        dim: int = 1,
+        rand_init: bool = False
+    ):
+        super(SphMipEncoding, self).__init__()
+        self.n_levels = n_levels
+        self.plane_size = plane_size
+        
+        self.register_parameter("fm", nn.Parameter(torch.zeros(Sn, dim, plane_size, 2*plane_size, feature_dim)),)
+        
+        if rand_init:
+            self.init_parameters()
+
+    def init_parameters(self) -> None:
+        nn.init.uniform_(self.fm, -1e-2, 1e-2)
+        
+    def forward(self, x, level, index=0, weight=False):
+        """
+        x: [0,1], Nx3
+        level: [0, max_level], Nx1
+        """
+        x[..., 0] = x[..., 0] * 0.5 + 0.25
+        
+        decomposed_x = x
+        
+        level = torch.broadcast_to(level, decomposed_x.shape[:3]).contiguous()
+        
+        fm = self.fm[index]  # [N, L, 2L, feat_dim]
+        
+        padding_fm = torch.cat([fm[:, :, self.plane_size:, :], fm, fm[:, :, :self.plane_size, :]], dim=2)
+        
+        enc = nvdiffrast.torch.texture(
+            padding_fm,
+            decomposed_x,
+            mip_level_bias=level*self.n_levels,
+            boundary_mode="clamp",
+            max_mip_level=self.n_levels - 1,
+        )
+        
+        enc = (enc.permute(1, 2, 0, 3).contiguous().view(x.shape[0], -1,))
+        return enc
+    
 
 def fetchPly(path):
     plydata = PlyData.read(path)
@@ -63,6 +113,7 @@ class GaussianModel:
 
         self.diffuse_activation = torch.sigmoid
         self.specular_activation = torch.sigmoid
+        self.specular2_activation = torch.tanh
         self.roughness_activation = torch.sigmoid
 
         self.rotation_activation = torch.nn.functional.normalize
@@ -107,13 +158,43 @@ class GaussianModel:
         self.setup_functions()
         self.opt_states = {}
         self.device = device
-        self.brdf_mlp = create_trainable_env_rnd(256, scale=0.0, bias=0.8)
+        #self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
         #self.brdf_mlp_2 = create_trainable_env_rnd(128, scale=0.0, bias=0.8)
         self._specular = torch.empty(0, device=device)
         self._specular2 = torch.empty(0, device=device)
         self._roughness = torch.empty(0, device=device)
         self._delta_normal = torch.empty(0, device=device)
         self.default_roughness = 0.6
+
+        
+        self.sph_dim = 16
+        self.dim = 1
+        # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
+
+        self.dir_encoding = None
+        self.light_mlp = None
+
+    def init_light_env(self):
+        n_levels = 9  
+        plane_size = 2**(n_levels)
+        run_dim = 512
+        self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
+        self.light_mlp = nn.Sequential(
+            nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim, run_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim, 3),
+        ).cuda()
+        nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
 
     def capture(self):
         if self.gaussian_dim == 3:
@@ -477,7 +558,7 @@ class GaussianModel:
         self._velocity3 = torch.empty(0, 3, device=self.device)
         self._rot_velocity = torch.empty(0, 4, device=self.device)
         self._specular = torch.empty(0, 3, device=self.device)
-        self._specular2 = torch.empty(0, 3, device=self.device)
+        self._specular2 = torch.empty(0, 4, device=self.device)
         self._delta_normal = torch.empty(0, 3, device=self.device)
         self._roughness = torch.empty(0, 1, device=self.device)
 
@@ -772,6 +853,10 @@ class GaussianModel:
             #     self.env_map = torch.cat([self.env_map, gaussians.env_map[mask]]).to(self.device)
             for group in gaussians.optimizer.param_groups:
                 if group["name"] == "brdf_mlp":
+                    continue
+                if group["name"] == "light_mlp":
+                    continue
+                if group["name"] == "dir_encoding":
                     continue
                 optimizer_state = gaussians.optimizer.state.get(group["params"][0], None)
                 if optimizer_state is not None:
@@ -1072,7 +1157,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
-                specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
+                specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
@@ -1169,7 +1254,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1265,7 +1350,7 @@ class GaussianModel:
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                            specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1328,8 +1413,8 @@ class GaussianModel:
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
-        if pcd.points.shape[0] > 500000:
-            mask = np.random.randint(0, pcd.points.shape[0], 500000)
+        if pcd.points.shape[0] > 1000000:
+            mask = np.random.randint(0, pcd.points.shape[0], 1000000)
             xyz = pcd.points[mask]
             rgb = pcd.colors[mask]
             normals = pcd.normals[mask]
@@ -1370,7 +1455,7 @@ class GaussianModel:
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    specular2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                    specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
                     
@@ -1513,10 +1598,12 @@ class GaussianModel:
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.specular_lr, "name": "specular"})
-                l.append({'params': [self._specular2], 'lr': training_args.specular_lr, "name": "specular2"})
+                l.append({'params': [self._specular2], 'lr': training_args.feature_lr, "name": "specular2"})
                 l.append({'params': [self._delta_normal], 'lr': training_args.delta_normal_lr, "name": "delta_normal"})
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
-                l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
+                #l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
+                l.append({'params': list(self.light_mlp.parameters()), 'lr': training_args.mlp_lr, "name": "light_mlp"})
+                l.append({'params': list(self.dir_encoding.parameters()), 'lr': training_args.encoding_lr, "name": "dir_encoding"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         # self.optimizer = AdamWithMaskedUpdates(l, lr=0.0, eps=1e-15)
@@ -1611,6 +1698,10 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group["name"] == "brdf_mlp":
                 continue
+            if group["name"] == "light_mlp":
+                continue
+            if group["name"] == "dir_encoding":
+                continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
                 stored_state["exp_avg"] = stored_state["exp_avg"][mask]
@@ -1660,9 +1751,13 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            assert len(group["params"]) == 1
             if group["name"] == "brdf_mlp":
                 continue
+            if group["name"] == "light_mlp":
+                continue
+            if group["name"] == "dir_encoding":
+                continue
+            assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:

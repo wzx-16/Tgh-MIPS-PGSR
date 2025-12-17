@@ -73,6 +73,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # tb_writer = prepare_output_and_logger(dataset)
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
+    gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     
     #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
@@ -117,7 +118,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
     #print("test6")
     iteration = first_iter
-    fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
+    #fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     #depth_guidance_checkpoint = "LiheYoung/depth-anything-base-hf"
     #pipe_depth = pipeline("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
@@ -262,9 +263,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # random_color[2, :, :] = background[2]
                 # gt_image = gt_image * loaded_mask + random_color * sky_mask_percentage
                 # print("gaussiansize")
-                # print(xyz.size())
+                print(xyz.size())
                 # print(opacity.size())
-                gaussians.brdf_mlp.build_mips()
+                #gaussians.brdf_mlp.build_mips()
                 #gaussians.brdf_mlp_2.build_mips()
                 view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
                 d_viewdir_normalized = safe_normalize(view_pos - xyz)
@@ -275,6 +276,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
                                     gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration)
+                # rendered_spec = render_pkg["rendered_spec"]
+                # rendered_rough = render_pkg["rendered_rough"]
+                # rendered_gb_normal = render_pkg["rendered_gb_normal"]
+                # torchvision.utils.save_image(rendered_spec.permute(2,0,1), "rendered_spec.png")
+                # torchvision.utils.save_image(rendered_rough.permute(2,0,1), "rendered_rough.png")
+                # torchvision.utils.save_image((rendered_gb_normal.permute(2,0,1) + 1) / 2, "rendered_gb_normal.png")
+                # torchvision.utils.save_image(render_pkg["render"], "render.png")
                 # d_viewdir_normalized = safe_normalize(view_pos - )
                 # reflvec = safe_normalize(reflect(d_viewdir_normalized, render_pkg["rendered_normal"]))
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
@@ -300,13 +308,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # torch.cuda.empty_cache()
                 # gc.collect()
                 #print("image", image.shape, image.dtype, image.device, "gt", gt_image.shape)
-                lp = fn_lpips(image[None], gt_image[None], normalize=True)
+                #lp = fn_lpips(image[None], gt_image[None], normalize=True)
                 #lp = lpips_tiled(image[None], gt_image[None])
                 #print("test9")
                 # gt_image_resize = torch.nn.functional.interpolate(gt_image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # image_resize = torch.nn.functional.interpolate(image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # lp_resize = fn_lpips(image_resize, gt_image_resize, normalize=True)
-                loss = loss + 0.01 * lp.mean()
+                #loss = loss + 0.01 * lp.mean()
                 #print("loss 1", loss)
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 decay_weight = get_decay_weight(15000, 30000, iteration)
@@ -330,7 +338,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
                     elif iteration < 20000:
-                        loss += 0.02 * (torch.abs((depth_norm + render_depth_norm))).mean()
+                        loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
                     elif iteration < 15000:
                         loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     elif iteration < 30000:
@@ -381,7 +389,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration < 1000:
                         pass
                     elif iteration < 20000:
-                        loss += 0.1 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     elif iteration < 15000:
                         loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                         #loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
@@ -497,9 +505,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #loss += 0.1 * ((velocity_norm2 + velocity_norm3) / (velocity_norm + 1e-6)).mean()
 
                 # single-view loss
-                if iteration > 1500:
+                if iteration > 500:
                     if iteration < 20000:
-                        weight = 0.15
+                        weight = 0.1
                     else:
                         weight = 0.05
                     normal = render_pkg["rendered_normal"]
@@ -639,7 +647,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     else:
                         gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
                         
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and (iteration < 3000 or iteration > 6000):
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, opt.densify_grad_t_threshold)

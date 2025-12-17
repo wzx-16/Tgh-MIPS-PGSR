@@ -89,6 +89,8 @@ class OptimizationParams(ParamGroup):
         self.brdf_mlp_lr_final = 0.00016
         self.brdf_mlp_lr_delay_mult = 0.01
         self.brdf_mlp_lr_max_steps = 30_000
+        self.encoding_lr = 0.002
+        self.mlp_lr = 0.0005
         self.feature_lr = 0.0025
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005

@@ -132,20 +132,19 @@ class EnvironmentLight(torch.nn.Module):
 
         return rgb
     
-    def shade_without_diffuse(self, gb_pos, gb_normal, d_reflvec, kd, ks, kr, view_pos, iteration, specular=True):
+    def shade_without_diffuse(self, wo, reflvec, gb_normal, ks, kr, iteration, specular=True):
         # (H, W, N, C)
-        wo = util.safe_normalize(view_pos - gb_pos)
-
+        #wo = util.safe_normalize(view_pos - gb_pos)
+        wo = util.safe_normalize(wo)
         if specular:
-            diffuse_raw = kd
             roughness = kr
             spec_col  = ks
             diff_col  = 1.0 - ks
         else:
             raise NotImplementedError
 
-        reflvec = util.safe_normalize(util.reflect(wo, gb_normal))
-        reflvec = util.safe_normalize(reflvec + d_reflvec)
+        # reflvec = util.safe_normalize(util.reflect(wo, gb_normal))
+        # reflvec = util.safe_normalize(reflvec + d_reflvec)
         nrmvec = gb_normal
         if self.mtx is not None: # Rotate lookup
             mtx = torch.as_tensor(self.mtx, dtype=torch.float32, device='cuda')

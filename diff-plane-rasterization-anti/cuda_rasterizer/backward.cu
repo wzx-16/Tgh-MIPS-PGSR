@@ -510,7 +510,7 @@ renderCUDA(
 			const float3 normal = {all_map_pixels[pix_id], all_map_pixels[H * W + pix_id], all_map_pixels[2 * H * W + pix_id]};
 			const float distance = all_map_pixels[4 * H * W + pix_id];
 			const float tmp = (normal.x * ray.x + normal.y * ray.y + normal.z + 1.0e-8);
-			dL_dout_all_map[MAP_N-1] += (-dL_dout_plane_depths[pix_id] / tmp);
+			dL_dout_all_map[4] += (-dL_dout_plane_depths[pix_id] / tmp);
 			dL_dout_all_map[0] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.x);
 			dL_dout_all_map[1] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp) * ray.y);
 			dL_dout_all_map[2] += dL_dout_plane_depths[pix_id] * (distance / (tmp * tmp));

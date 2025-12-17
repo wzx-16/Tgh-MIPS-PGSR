@@ -20,7 +20,49 @@ from utils.sh_utils import eval_sh, eval_shfs_4d
 from utils.transformation_util import matrix_to_quaternion, quaternion_to_matrix
 from utils.graphics_utils import focal2fov, getProjectionMatrix, normal_from_depth_image
 from utils.color_utils import linear2srgb
+from utils.sph_util import cart2sph
 import numpy as np
+
+def reflection(rayd, normal):
+    refl = rayd - 2*normal*torch.sum(rayd*normal, dim=-1, keepdim=True)
+    return refl
+
+def sample_cubemap_color(rays_d, env_map):
+    H,W = rays_d.shape[:2]
+    outcolor = torch.sigmoid(env_map(rays_d.reshape(-1,3)))
+    outcolor = outcolor.reshape(H,W,3).permute(2,0,1)
+    return outcolor
+
+def sample_camera_rays(HWK, R, T, pixel_camera):
+    pixel_camera = torch.tensor(pixel_camera).cuda()
+    H,W,K = HWK
+    R = R.T # NOTE!!! the R rot matrix is transposed save in 3DGS
+    
+    #global pixel_camera
+    # if pixel_camera is None or pixel_camera.shape[0] != H:
+    # K = K.astype(np.float32)
+    # i, j = np.meshgrid(np.arange(W, dtype=np.float32),
+    #                 np.arange(H, dtype=np.float32),
+    #                 indexing='xy')
+    # xy1 = np.stack([i, j, np.ones_like(i)], axis=2)
+    # pixel_camera = np.dot(xy1, np.linalg.inv(K).T)
+    # pixel_camera = torch.tensor(pixel_camera).cuda()
+
+    rays_o = (-R.T @ T.unsqueeze(-1)).flatten()
+    pixel_world = (pixel_camera - T[None, None]).reshape(-1, 3) @ R
+    rays_d = pixel_world - rays_o[None]
+    rays_d = rays_d / torch.norm(rays_d, dim=1, keepdim=True)
+    rays_d = rays_d.reshape(H,W,3)
+    #rays_d = rays_d.permute(1, 0, 2)
+    return rays_d
+
+def get_refl_dir(HWK, R, T, normal_map, pixel_camera): #RT W2C
+    rays_d = sample_camera_rays(HWK, R, T, pixel_camera)
+    #print("rays d", rays_d.shape)
+    #print("normal map", normal_map.shape)
+    rays_f = reflection(rays_d, normal_map)
+    #rays_d = rays_d.clamp(-1, 1) # avoid numerical error when arccos
+    return rays_f, rays_d
 
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
@@ -463,11 +505,12 @@ def render_3d_pgsr_anti(
     xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / (pc.get_sigma_t + 1)
     view_pos = viewpoint_camera.camera_center
     diffuse   = pc.get_diffuse(dir_pp)
+    #diffuse = torch.clamp_min(diffuse + 0.5, 0.0)
     #diffuse   = torch.logit(pc.get_diffuse.clamp(0 + 1e-6, 1 - 1e-6)) + 1.098612
     specular  = pc.get_specular
-    #specular2 = pc.get_specular2
+    specular2 = pc.get_specular2
     roughness = pc.get_roughness
-    if iteration >= 5000:
+    if iteration > 20000:
         color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
         #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
         #color = color + color2
@@ -476,7 +519,8 @@ def render_3d_pgsr_anti(
         shs = None
         colors_precomp = color.squeeze() 
     elif iteration < 0:
-        color = torch.sigmoid(diffuse - np.log(3.0))
+        #color = torch.sigmoid(diffuse - np.log(3.0))
+        color = diffuse
         colors_precomp = color.squeeze() 
         shs = None
     else:
@@ -494,6 +538,9 @@ def render_3d_pgsr_anti(
         scales = scales[mask]
         rotations = rotations[mask]
         opacity = opacity[mask]
+        specular = specular[mask]
+        roughness = roughness[mask]
+        specular2 = specular2[mask]
 
     #shs = None
 
@@ -522,10 +569,15 @@ def render_3d_pgsr_anti(
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
     local_distance = -(local_normal * pts_in_cam).sum(-1)
-    input_all_map = torch.zeros((means3D.shape[0], 5)).cuda().float()
+    input_all_map = torch.zeros((means3D.shape[0], 16)).cuda().float()
     input_all_map[:, :3] = local_normal
     input_all_map[:, 3] = 1.0
     input_all_map[:, 4] = local_distance
+    #print("specular", specular)
+    input_all_map[:, 5:8] = specular
+    input_all_map[:, 8:9] = roughness
+    input_all_map[:, 9:12] = global_normal
+    input_all_map[:, 12:16] = specular2
 
     # print(local_distance.min().data, local_distance.mean().data, local_distance.max().data, 'ddd')
     # print(torch.linalg.norm(input_all_map[:, :3], dim=-1).min(), torch.linalg.norm(input_all_map[:, :3], dim=-1).max(), 'ooo')
@@ -566,6 +618,55 @@ def render_3d_pgsr_anti(
     rendered_normal = out_all_map[0:3]
     rendered_alpha = out_all_map[3:4, ]
     rendered_distance = out_all_map[4:5, ]
+    rendered_specular = out_all_map[5:8]
+    rendered_roughness = out_all_map[8:9]
+    rendered_global_normal = out_all_map[9:12]
+    rendered_specular2 = out_all_map[12:16]
+    rendered_global_normal = torch.nn.functional.normalize(rendered_global_normal.permute(1, 2, 0), dim=2, eps=1e-6)
+    rendered_specular = rendered_specular.permute(1, 2, 0)
+    rendered_roughness = rendered_roughness.permute(1, 2, 0)
+    feature_map = rendered_specular2.reshape(-1, 4)
+    feature_map = F.normalize(feature_map, dim=-1)
+    feature_map = feature_map.reshape(-1, 1, 4)
+    #print("feature map", feature_map)
+
+    if iteration >= 5000:
+        K = np.zeros((3,3))
+        K[0][0] = viewpoint_camera.fl_x
+        K[0][2] = viewpoint_camera.cx
+        K[1][1] = viewpoint_camera.fl_y
+        K[1][2] = viewpoint_camera.cy
+        K[2][2] = 1
+        HWK = (viewpoint_camera.H, viewpoint_camera.W, K)
+        R = torch.tensor(viewpoint_camera.R, dtype=torch.float32, device='cuda')
+        T = torch.tensor(viewpoint_camera.T, dtype=torch.float32, device='cuda')
+        #print(rendered_global_normal.size())
+        reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.pixel_camera)
+        #wo = -rays_d
+        wo_xy = (cart2sph(reflec_dir.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
+
+        wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
+        #print(wo_xyz)
+        spec_level = rendered_roughness.reshape(-1, 1)
+
+        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0).reshape(-1, pc.sph_dim)
+        #print(spec_feat)
+        spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)
+        spec_feat_dirc = spec_feat.reshape(-1, pc.sph_dim)
+        wrap_input = (spec_feat_wrap @ feature_map).reshape(-1, pc.sph_dim*4)
+        input_mlp = torch.cat([wrap_input, spec_feat_dirc,], -1)
+        #print(input_mlp)
+        mlp_output = pc.light_mlp(input_mlp).float()
+        spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
+        # print("wo", wo.shape, wo.min().item(), wo.max().item())
+        # print("refl", reflec_dir.shape, reflec_dir.min().item(), reflec_dir.max().item())
+        # print("nrm len", rendered_global_normal.norm(dim=-1).mean().item())
+        #specular_image = pc.brdf_mlp.shade_without_diffuse(wo.unsqueeze(2), reflec_dir.unsqueeze(2), rendered_global_normal.unsqueeze(2), rendered_specular.unsqueeze(2), rendered_roughness.unsqueeze(2), iteration)
+        # if iteration > 10:
+        #rendered_image = rendered_image + specular_image.squeeze().permute(2, 0, 1)
+        #print("spec light", spec_light.size())
+        rendered_image = rendered_image + spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)
+        #rendered_image = spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)
     # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
     
     return_dict =  {"render": rendered_image,
@@ -578,6 +679,9 @@ def render_3d_pgsr_anti(
                     "depth": plane_depth,
                     "rendered_distance": rendered_distance,
                     'alpha': rendered_alpha,
+                    "rendered_spec": rendered_specular,
+                    "rendered_rough": rendered_roughness,
+                    "rendered_gb_normal": rendered_global_normal,
                     # 'index': index,
                     # 'scales': scales,
                     }

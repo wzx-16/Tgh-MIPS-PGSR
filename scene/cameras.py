@@ -19,7 +19,7 @@ from copy import deepcopy
 class Camera:
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
-                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", timestamp = 0.0,
+                 trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", timestamp = 0.0, W=0, H=0,
                  cx=-1, cy=-1, fl_x=-1, fl_y=-1, depth=None, resolution=None, image_path=None, meta_only=False,
                  ):
 
@@ -30,6 +30,8 @@ class Camera:
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.W = W
+        self.H = H
         self.cx = cx
         self.cy = cy
         self.fl_x = fl_x
@@ -79,6 +81,20 @@ class Camera:
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         
         self.timestamp = timestamp
+        K = np.zeros((3,3))
+        K[0][0] = self.fl_x
+        K[0][2] = self.cx
+        K[1][1] = self.fl_y
+        K[1][2] = self.cy
+        K[2][2] = 1
+        K = K.astype(np.float32)
+        i, j = np.meshgrid(np.arange(W, dtype=np.float32),
+                        np.arange(H, dtype=np.float32),
+                        indexing='xy')
+        xy1 = np.stack([i, j, np.ones_like(i)], axis=2)
+        pixel_camera = np.dot(xy1, np.linalg.inv(K).T)
+        #pixel_camera = torch.tensor(pixel_camera).cuda()
+        self.pixel_camera = pixel_camera
         
     def get_rays(self):
         grid = create_meshgrid(self.image_height, self.image_width, normalized_coordinates=False)[0] + 0.5
