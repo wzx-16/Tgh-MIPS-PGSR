@@ -665,7 +665,7 @@ def render_3d_pgsr_anti(
         # if iteration > 10:
         #rendered_image = rendered_image + specular_image.squeeze().permute(2, 0, 1)
         #print("spec light", spec_light.size())
-        rendered_image = rendered_image + spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)
+        rendered_image = linear2srgb(rendered_image + spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1))
         #rendered_image = spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)
     # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
     
