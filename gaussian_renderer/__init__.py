@@ -682,6 +682,7 @@ def render_3d_pgsr_anti(
                     "rendered_spec": rendered_specular,
                     "rendered_rough": rendered_roughness,
                     "rendered_gb_normal": rendered_global_normal,
+                    "rendered_feature": rendered_specular2,
                     # 'index': index,
                     # 'scales': scales,
                     }

@@ -1069,7 +1069,7 @@ class GaussianModel:
 
     @property
     def get_specular2(self):
-        return self.specular_activation(self._specular2)
+        return self.specular2_activation(self._specular2)
     
     @property
     def get_delta_normal(self):

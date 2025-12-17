@@ -32,6 +32,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     depth_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth_normal")
     rendered_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_normal")
     depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_depth")
+    feature_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_feature")
     # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     # pipe.model.eval()
@@ -42,6 +43,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     makedirs(depth_normal_path, exist_ok=True)
     makedirs(rendered_normal_path, exist_ok=True)
     makedirs(depth_path, exist_ok=True)
+    makedirs(feature_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -125,6 +127,19 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         rendered_normal = (render_package["rendered_normal"] + 1.0) / 2
         render_depth = render_package["depth"]
         gt = view[0][0:3, :, :]
+        feature_map = render_package["rendered_feature"].detach()
+        h, w = feature_map.shape[1:]
+        flat_feature = feature_map.permute(1, 2, 0).reshape(-1, 4)
+        flat_mean = flat_feature.mean(dim=0, keepdim=True)
+        centered_feature = flat_feature - flat_mean
+        if centered_feature.abs().max() > 0:
+            _, _, pcs = torch.pca_lowrank(centered_feature, q=3)
+            projected = centered_feature @ pcs[:, :3]
+            feature_vis = projected.reshape(h, w, 3).permute(2, 0, 1)
+            feature_vis = feature_vis - feature_vis.min()
+            feature_vis = feature_vis / (feature_vis.max() - feature_vis.min() + 1e-6)
+        else:
+            feature_vis = torch.zeros((3, h, w), device=feature_map.device)
 
         # to_pil_image = transforms.ToPILImage()
         # gt_pil = to_pil_image(gt)
@@ -142,6 +157,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(feature_vis, os.path.join(feature_path, '{0:05d}'.format(idx) + ".png"))
 
 def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool):
     with torch.no_grad():
