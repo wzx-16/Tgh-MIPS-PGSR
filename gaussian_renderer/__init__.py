@@ -22,6 +22,14 @@ from utils.graphics_utils import focal2fov, getProjectionMatrix, normal_from_dep
 from utils.color_utils import linear2srgb
 from utils.sph_util import cart2sph
 import numpy as np
+import torchvision
+
+def get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS):
+    if ENV_CENTER is None or ENV_RADIUS is None:
+        #print("mask", (torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)).size())
+        return torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)
+    #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
+    return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
 
 def reflection(rayd, normal):
     refl = rayd - 2*normal*torch.sum(rayd*normal, dim=-1, keepdim=True)
@@ -61,6 +69,7 @@ def get_refl_dir(HWK, R, T, normal_map, pixel_camera): #RT W2C
     #print("rays d", rays_d.shape)
     #print("normal map", normal_map.shape)
     rays_f = reflection(rays_d, normal_map)
+    rays_f = torch.nn.functional.normalize(rays_f, dim=-1)
     #rays_d = rays_d.clamp(-1, 1) # avoid numerical error when arccos
     return rays_f, rays_d
 
@@ -446,6 +455,8 @@ def render_3d_pgsr_anti(
     dir_pp = None,
     pc: GaussianModel = None,
     iteration = 0,
+    ENV_CENTER = None,
+    ENV_RADIUS = None,
 ):
     means3D = xyz
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -510,14 +521,39 @@ def render_3d_pgsr_anti(
     specular  = pc.get_specular
     specular2 = pc.get_specular2
     roughness = pc.get_roughness
-    if iteration > 20000:
-        color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
+    #if iteration > 10000000 and iteration % 2 == 0:
+    if iteration > 700000:
+        #color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
         #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
         #color = color + color2
         #color = diffuse
-        color = linear2srgb(color)
+        #color = linear2srgb(color)
+        #shs = None
+        #colors_precomp = color.squeeze() 
+
+
+        feature_map = specular2.reshape(-1, 4)
+        feature_map = F.normalize(feature_map, dim=-1)
+        feature_map = feature_map.reshape(-1, 1, 4)
+        wo_xy = (cart2sph(reflect.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
+
+        wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
+        #print(wo_xyz)
+        spec_level = roughness.reshape(-1, 1)
+
+        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0).reshape(-1, pc.sph_dim)
+        #print(spec_feat)
+        spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)
+        spec_feat_dirc = spec_feat.reshape(-1, pc.sph_dim)
+        wrap_input = (spec_feat_wrap @ feature_map).reshape(-1, pc.sph_dim*4)
+        input_mlp = torch.cat([wrap_input, spec_feat_dirc,], -1)
+        #print(input_mlp)
+        mlp_output = pc.light_mlp(input_mlp).float()
+        spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
+
+        color = diffuse + spec_light
         shs = None
-        colors_precomp = color.squeeze() 
+        colors_precomp = color.squeeze()
     elif iteration < 0:
         #color = torch.sigmoid(diffuse - np.log(3.0))
         color = diffuse
@@ -569,7 +605,9 @@ def render_3d_pgsr_anti(
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
     local_distance = -(local_normal * pts_in_cam).sum(-1)
-    input_all_map = torch.zeros((means3D.shape[0], 16)).cuda().float()
+    gs_in = torch.ones_like(opacity)
+    gs_in[get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)] = 0.0
+    input_all_map = torch.zeros((means3D.shape[0], 17)).cuda().float()
     input_all_map[:, :3] = local_normal
     input_all_map[:, 3] = 1.0
     input_all_map[:, 4] = local_distance
@@ -578,6 +616,7 @@ def render_3d_pgsr_anti(
     input_all_map[:, 8:9] = roughness
     input_all_map[:, 9:12] = global_normal
     input_all_map[:, 12:16] = specular2
+    input_all_map[:, 16:17] = gs_in
 
     # print(local_distance.min().data, local_distance.mean().data, local_distance.max().data, 'ddd')
     # print(torch.linalg.norm(input_all_map[:, :3], dim=-1).min(), torch.linalg.norm(input_all_map[:, :3], dim=-1).max(), 'ooo')
@@ -622,15 +661,19 @@ def render_3d_pgsr_anti(
     rendered_roughness = out_all_map[8:9]
     rendered_global_normal = out_all_map[9:12]
     rendered_specular2 = out_all_map[12:16]
+    rendered_in = out_all_map[16:17]
     rendered_global_normal = torch.nn.functional.normalize(rendered_global_normal.permute(1, 2, 0), dim=2, eps=1e-6)
-    rendered_specular = rendered_specular.permute(1, 2, 0)
+    #print("gb normal size", rendered_global_normal.size())
+    #rendered_specular = rendered_specular.permute(1, 2, 0)
     rendered_roughness = rendered_roughness.permute(1, 2, 0)
+    rendered_specular2 = rendered_specular2.permute(1, 2, 0)
     feature_map = rendered_specular2.reshape(-1, 4)
-    feature_map = F.normalize(feature_map, dim=-1)
+    feature_map = F.normalize(feature_map, dim=-1, eps=1e-6)
     feature_map = feature_map.reshape(-1, 1, 4)
     #print("feature map", feature_map)
-
-    if iteration >= 5000:
+    spec_light = None
+    #if iteration >= 1000 and iteration % 2 == 1:
+    if iteration >= 1500:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx
@@ -642,6 +685,7 @@ def render_3d_pgsr_anti(
         T = torch.tensor(viewpoint_camera.T, dtype=torch.float32, device='cuda')
         #print(rendered_global_normal.size())
         reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.pixel_camera)
+        torchvision.utils.save_image((reflec_dir.permute(2,0,1)+1.0)/2.0, f'test_refl/reflec_dir_{iteration}.png')
         #wo = -rays_d
         wo_xy = (cart2sph(reflec_dir.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
 
@@ -665,8 +709,16 @@ def render_3d_pgsr_anti(
         # if iteration > 10:
         #rendered_image = rendered_image + specular_image.squeeze().permute(2, 0, 1)
         #print("spec light", spec_light.size())
-        rendered_image = linear2srgb(rendered_image + spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1))
+        #print("rendered_in", rendered_in.size())
+        pbr_rgb = linear2srgb(rendered_specular + spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1))
+        pbr_rgb = torch.clamp(pbr_rgb, 0.0, 1.0)
+        rendered_image = rendered_image * (1 - rendered_in) + pbr_rgb * rendered_in
+        #rendered_image = linear2srgb(spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1) * rendered_in)
+        #rendered_image = linear2srgb(rendered_image)
+        #rendered_image = rendered_in
         #rendered_image = spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)
+    else:
+        rendered_image = rendered_image
     # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
     
     return_dict =  {"render": rendered_image,
@@ -679,10 +731,12 @@ def render_3d_pgsr_anti(
                     "depth": plane_depth,
                     "rendered_distance": rendered_distance,
                     'alpha': rendered_alpha,
-                    "rendered_spec": rendered_specular,
+                    "rendered_spec": linear2srgb(spec_light.reshape(viewpoint_camera.H, viewpoint_camera.W, 3).permute(2, 0, 1)) * rendered_in if spec_light is not None else None,
+                    "rendered_diff": linear2srgb(rendered_specular) * rendered_in,
+                    "rendered_outside": rendered_image * (1 - rendered_in),
                     "rendered_rough": rendered_roughness,
                     "rendered_gb_normal": rendered_global_normal,
-                    "rendered_feature": rendered_specular2,
+                    "rendered_feature": rendered_specular2.permute(2, 0, 1),
                     # 'index': index,
                     # 'scales': scales,
                     }

@@ -147,8 +147,8 @@ class GaussianModel:
         self._rot_velocity = torch.empty(0, device = device)
         self.force_sh_3d = force_sh_3d
         self.t_gradient_accum = torch.empty(0, device=device)
-        if self.rot_4d or self.force_sh_3d:
-            assert self.gaussian_dim == 4
+        # if self.rot_4d or self.force_sh_3d:
+        #     assert self.gaussian_dim == 4
         self.env_map = torch.empty(0, device=device)
         
         self.active_sh_degree_t = 0
@@ -164,7 +164,8 @@ class GaussianModel:
         self._specular2 = torch.empty(0, device=device)
         self._roughness = torch.empty(0, device=device)
         self._delta_normal = torch.empty(0, device=device)
-        self.default_roughness = 0.6
+        self.default_roughness = 0.0
+        self._albedo_bias = 2
 
         
         self.sph_dim = 16
@@ -185,7 +186,7 @@ class GaussianModel:
     def init_light_env(self):
         n_levels = 9  
         plane_size = 2**(n_levels)
-        run_dim = 512
+        run_dim = 256
         self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         self.light_mlp = nn.Sequential(
             nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -194,6 +195,13 @@ class GaussianModel:
             nn.ReLU(inplace=True),
             nn.Linear(run_dim, 3),
         ).cuda()
+
+        # for m in self.light_mlp:
+        #     if isinstance(m, nn.Linear):
+        #         nn.init.xavier_uniform_(m.weight)
+        #         if m.bias is not None:
+        #             nn.init.constant_(m.bias, 0)
+
         nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
 
     def capture(self):
@@ -538,6 +546,28 @@ class GaussianModel:
         neg_mask = (normal_global * gaussian_to_cam_global).sum(-1) < 0.0
         normal_global[neg_mask] = -normal_global[neg_mask]
         return normal_global
+
+    def enlarge_refl_scales(self, ret_raw = True, ENLARGE_SCALE=1.5, REFL_MSK_THR = 0.02, exclusive_msk = None):
+        #refl_msk = self.get_refl.flatten() < REFL_MSK_THR
+        if exclusive_msk is not None:
+            refl_msk = torch.logical_or(refl_msk, exclusive_msk)
+        scales = self.get_scaling
+        min_axis_id = torch.argmin(scales, dim = -1, keepdim=True)
+        rmin_axis = (torch.ones_like(scales)*ENLARGE_SCALE).scatter(1, min_axis_id, 1)
+        if ret_raw:
+            scale_new = self.scaling_inverse_activation(scales*rmin_axis)
+            # only reset refl gaussians
+            scale_new = self._scaling
+        else:
+            scale_new = scales*rmin_axis
+            scale_new = scales
+        return scale_new
+
+    def reset_scale(self, exclusive_msk = None):
+        scale_new = self.enlarge_refl_scales(ret_raw=True)
+        optimizable_tensors = self.replace_tensor_to_optimizer(scale_new, "scaling")
+        if "scaling" not in optimizable_tensors: return
+        self._scaling = optimizable_tensors["scaling"]
 
     def clear_gaussians(self, gaussians):
         self._xyz = torch.empty(0, 3, device=self.device)
@@ -1065,7 +1095,9 @@ class GaussianModel:
     
     @property
     def get_specular(self):
-        return self.specular_activation(self._specular)
+        #return self.specular_activation(self._specular)
+        bias = torch.tensor(5.0, dtype=torch.float32).to("cuda")
+        return torch.exp(torch.clamp(self._specular, max=5.0)-torch.log(bias))
 
     @property
     def get_specular2(self):
@@ -1111,9 +1143,9 @@ class GaussianModel:
             return (self.max_sh_degree+1)**2 * (self.max_sh_degree_t + 1)
     
     def get_diffuse(self, dir):
-        #return eval_sh(0, self._features_dc.transpose(1, 2), None)
+        return eval_sh(0, self._features_dc.transpose(1, 2), None)
 
-        return eval_sh(2, self.get_features.transpose(1, 2), dir)
+        #return eval_sh(2, self.get_features.transpose(1, 2), dir)
     
     def get_marginal_t(self, timestamp, scaling_modifier = 1): # Standard
         sigma = self.get_sigma_t * scaling_modifier ** 2
@@ -1157,7 +1189,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
-                specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+                specular2 = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
@@ -1254,7 +1286,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+                specular2 = torch.rand((fused_point_cloud.shape[0], 4), device=self.device)
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1284,132 +1316,132 @@ class GaussianModel:
     def create_from_multi_pcd(self, path, tgh, spatial_lr_scale : float, time_duration=None):
         self.spatial_lr_scale = spatial_lr_scale
         self._xyz = None
-        pcd_parent_path = os.path.join(path, 'pcds_j10')
-        pcd_list = os.listdir(os.path.join(path, 'pcds_j10'))
-        #pcd_list = ["points3d.ply" for i in range(200)]
-        pcd_list = sorted(pcd_list)
-        fps = 30.
-        points_before = None
-        with torch.no_grad():
-        # pcd_list = ['points.ply' for _ in range(640)]
-            for ii, pcd_path in enumerate(pcd_list[:]):
-                if ii < 0:
+        # pcd_parent_path = os.path.join(path, 'pcds_j10')
+        # pcd_list = os.listdir(os.path.join(path, 'pcds_j10'))
+        # #pcd_list = ["points3d.ply" for i in range(200)]
+        # pcd_list = sorted(pcd_list)
+        # fps = 30.
+        # points_before = None
+        #with torch.no_grad():
+        # pcd_list = ['points3d.ply' for _ in range(640)]
+            # for ii, pcd_path in enumerate(pcd_list[:]):
+            #     if ii < 0:
                 
-                #if ii < 80 and ii >= 60:
-                #if ii < 10:
+            #     #if ii < 80 and ii >= 60:
+            #     #if ii < 10:
             
-                    # if ii % 30 != 0:
-                    #     continue
-                    timestamp = (ii) / fps
-                    # timestamp = ii / fps
-                    if time_duration is not None:
-                        if timestamp < time_duration[0]:
-                            continue
-                        if timestamp > time_duration[1]:
-                            break
-                    #break
-                    ply_path = os.path.join(pcd_parent_path, pcd_path)
-                    pcd = fetchPly(ply_path)
-                    if pcd.points.shape[0] > 150000:
-                        mask = np.random.randint(0, pcd.points.shape[0], 150000)
-                        xyz = pcd.points[mask]
-                        rgb = pcd.colors[mask]
-                        normals = pcd.normals[mask]
+            #         # if ii % 30 != 0:
+            #         #     continue
+            #         timestamp = (ii) / fps
+            #         # timestamp = ii / fps
+            #         if time_duration is not None:
+            #             if timestamp < time_duration[0]:
+            #                 continue
+            #             if timestamp > time_duration[1]:
+            #                 break
+            #         #break
+            #         ply_path = os.path.join(pcd_parent_path, pcd_path)
+            #         pcd = fetchPly(ply_path)
+            #         if pcd.points.shape[0] > 150000:
+            #             mask = np.random.randint(0, pcd.points.shape[0], 150000)
+            #             xyz = pcd.points[mask]
+            #             rgb = pcd.colors[mask]
+            #             normals = pcd.normals[mask]
 
-                        pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=timestamp)
+            #             pcd = BasicPointCloud(points=xyz, colors=rgb, normals=normals, time=timestamp)
                     
-                    fused_point_cloud = torch.tensor(np.asarray(pcd.points), device=self.device, dtype=torch.float)
-                    fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors), device=self.device, dtype=torch.float))
-                    features = torch.zeros((fused_color.shape[0], 3, self.get_max_sh_channels), device=self.device, dtype=torch.float)
-                    features[:, :3, 0 ] = fused_color
-                    features[:, 3:, 1:] = 0.0
-                    if self.gaussian_dim == 4:
-                        # seg = 2.5/4
-                        seg = 1 / fps * 3
-                        # fused_times = torch.zeros_like(fused_point_cloud[..., :1]) + ((timestamp + seg/4 - time_duration[0]) // seg) * seg + seg/2 + time_duration[0] - seg/4
-                        fused_times = (torch.zeros_like(fused_point_cloud[..., :1]) + timestamp - time_duration[0]) / 1
-                    print("Number of points at initialisation : ", fused_point_cloud.shape[0], timestamp - time_duration[0])
+            #         fused_point_cloud = torch.tensor(np.asarray(pcd.points), device=self.device, dtype=torch.float)
+            #         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors), device=self.device, dtype=torch.float))
+            #         features = torch.zeros((fused_color.shape[0], 3, self.get_max_sh_channels), device=self.device, dtype=torch.float)
+            #         features[:, :3, 0 ] = fused_color
+            #         features[:, 3:, 1:] = 0.0
+            #         if self.gaussian_dim == 4:
+            #             # seg = 2.5/4
+            #             seg = 1 / fps * 3
+            #             # fused_times = torch.zeros_like(fused_point_cloud[..., :1]) + ((timestamp + seg/4 - time_duration[0]) // seg) * seg + seg/2 + time_duration[0] - seg/4
+            #             fused_times = (torch.zeros_like(fused_point_cloud[..., :1]) + timestamp - time_duration[0]) / 1
+            #         print("Number of points at initialisation : ", fused_point_cloud.shape[0], timestamp - time_duration[0])
 
-                    dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001).to(self.device)
-                    if points_before is None:
-                        dist2b = fused_point_cloud
-                    else:
-                        dist2b = distCUDA2b(torch.from_numpy(np.asarray(pcd.points)).float().cuda(),points_before).to(self.device)
-                    scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
-                    rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                    rots[:, 0] = 1
-                    if self.gaussian_dim == 4:
-                        # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
-                        # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 1000
-                        dist_t = (torch.zeros_like(fused_times, device=self.device) + seg/2) / 1
-                        #scales_t = torch.log(torch.sqrt(dist_t))
-                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
-                        if self.rot_4d:
-                            velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 0 * (1 + self.scaling_activation(scales_t)**2)) 
-                            velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                            specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                            delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                            roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
+            #         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001).to(self.device)
+            #         if points_before is None:
+            #             dist2b = fused_point_cloud
+            #         else:
+            #             dist2b = distCUDA2b(torch.from_numpy(np.asarray(pcd.points)).float().cuda(),points_before).to(self.device)
+            #         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 3)
+            #         rots = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+            #         rots[:, 0] = 1
+            #         if self.gaussian_dim == 4:
+            #             # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
+            #             # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 1000
+            #             dist_t = (torch.zeros_like(fused_times, device=self.device) + seg/2) / 1
+            #             #scales_t = torch.log(torch.sqrt(dist_t))
+            #             scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
+            #             if self.rot_4d:
+            #                 velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 0 * (1 + self.scaling_activation(scales_t)**2)) 
+            #                 velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+            #                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+            #                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+            #                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+            #                 specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+            #                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+            #                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
-                    opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
+            #         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device=self.device))
 
-                    self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
-                    self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
-                    self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
-                    self._scaling = nn.Parameter(scales.requires_grad_(True))
-                    self._rotation = nn.Parameter(rots.requires_grad_(True))
-                    self._opacity = nn.Parameter(opacities.requires_grad_(True))
+            #         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
+            #         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+            #         self._features_rest = nn.Parameter(features[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+            #         self._scaling = nn.Parameter(scales.requires_grad_(True))
+            #         self._rotation = nn.Parameter(rots.requires_grad_(True))
+            #         self._opacity = nn.Parameter(opacities.requires_grad_(True))
                     
-                    if self.gaussian_dim == 4:
-                        self._t = nn.Parameter(fused_times.requires_grad_(True))
-                        self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
-                        if self.rot_4d:
-                            self._velocity = nn.Parameter(velocity.requires_grad_(True))
-                            self._velocity2 = nn.Parameter(velocity2.requires_grad_(True))
-                            self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
-                            self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
-                            self._specular = nn.Parameter(specular.requires_grad_(True))
-                            self._specular2 = nn.Parameter(specular2.requires_grad_(True))
-                            self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
-                            self._roughness = nn.Parameter(roughness.requires_grad_(True))
+            #         if self.gaussian_dim == 4:
+            #             self._t = nn.Parameter(fused_times.requires_grad_(True))
+            #             self._scaling_t = nn.Parameter(scales_t.requires_grad_(True))
+            #             if self.rot_4d:
+            #                 self._velocity = nn.Parameter(velocity.requires_grad_(True))
+            #                 self._velocity2 = nn.Parameter(velocity2.requires_grad_(True))
+            #                 self._velocity3 = nn.Parameter(velocity3.requires_grad_(True))
+            #                 self._rot_velocity = nn.Parameter(rot_velocity.requires_grad_(True))
+            #                 self._specular = nn.Parameter(specular.requires_grad_(True))
+            #                 self._specular2 = nn.Parameter(specular2.requires_grad_(True))
+            #                 self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
+            #                 self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
-                    self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
-                    # self.xyz_gradient_accum = torch.zeros_like(self._xyz, device=self.device)
-                    # self.t_gradient_accum = torch.zeros_like(self._t, device=self.device)
-                    # self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
-                    self.training_setup(tgh.opt)
-                    tgh.create_from_gaussians(self)
-                    # del self._xyz
-                    # del self._features_dc
-                    # del self._features_rest
-                    # del self._scaling
-                    # del self._rotation
-                    # del self._opacity
-                    # del self._t
-                    # del self._scaling_t
-                    # del self._velocity
-                    # del fused_point_cloud
-                    # del fused_color
-                    # del fused_times
-                    # del features
-                    # del dist2
-                    # del scales
-                    # del rots
-                    # del dist_t
-                    # del scales_t
-                    # del velocity
-                    # del opacities
-                    # del self.xyz_gradient_accum
-                    # del self.xyz_gradient_accum_abs
-                    # del self.denom
-                    # del self.optimizer
-                    # gc.collect()
-                    #torch.cuda.empty_cache()
-                    print(torch.cuda.memory_summary())
-                    points_before = fused_point_cloud
+            #         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device=self.device)
+            #         # self.xyz_gradient_accum = torch.zeros_like(self._xyz, device=self.device)
+            #         # self.t_gradient_accum = torch.zeros_like(self._t, device=self.device)
+            #         # self.denom = torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+            #         self.training_setup(tgh.opt)
+            #         tgh.create_from_gaussians(self)
+            #         # del self._xyz
+            #         # del self._features_dc
+            #         # del self._features_rest
+            #         # del self._scaling
+            #         # del self._rotation
+            #         # del self._opacity
+            #         # del self._t
+            #         # del self._scaling_t
+            #         # del self._velocity
+            #         # del fused_point_cloud
+            #         # del fused_color
+            #         # del fused_times
+            #         # del features
+            #         # del dist2
+            #         # del scales
+            #         # del rots
+            #         # del dist_t
+            #         # del scales_t
+            #         # del velocity
+            #         # del opacities
+            #         # del self.xyz_gradient_accum
+            #         # del self.xyz_gradient_accum_abs
+            #         # del self.denom
+            #         # del self.optimizer
+            #         # gc.collect()
+            #         #torch.cuda.empty_cache()
+            #         print(torch.cuda.memory_summary())
+            #         points_before = fused_point_cloud
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
@@ -1502,7 +1534,7 @@ class GaussianModel:
                 self._velocity2 = nn.Parameter(_velocity2.requires_grad_(True))
                 self._velocity3 = nn.Parameter(_velocity3.requires_grad_(True))
                 self._rot_velocity = nn.Parameter(_rot_velocity.requires_grad_(True))
-                self._specular = nn.Parameter(_specular.requires_grad_(True))
+                self._specular = nn.Parameter(_specular.requires_grad_(True) - self._albedo_bias)
                 self._specular2 = nn.Parameter(_specular2.requires_grad_(True))
                 self._delta_normal = nn.Parameter(_delta_normal.requires_grad_(True))
                 self._roughness = nn.Parameter(_roughness.requires_grad_(True))
@@ -1604,6 +1636,11 @@ class GaussianModel:
                 #l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
                 l.append({'params': list(self.light_mlp.parameters()), 'lr': training_args.mlp_lr, "name": "light_mlp"})
                 l.append({'params': list(self.dir_encoding.parameters()), 'lr': training_args.encoding_lr, "name": "dir_encoding"})
+        print("roughness lr", training_args.roughness_lr)
+        print("albedo learning rate", training_args.specular_lr)
+        print("feature learning rate", training_args.feature_lr)
+        print("mlp learning rate", training_args.mlp_lr)
+        print("encoding learning rate", training_args.encoding_lr)
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         # self.optimizer = AdamWithMaskedUpdates(l, lr=0.0, eps=1e-15)
@@ -1658,7 +1695,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
 
     def reset_diffuse(self):
-        mask = self.get_specular.mean(dim=-1) < 0.8
+        mask = torch.zeros_like(self._features_dc).bool()
+        #mask = self.get_specular.mean(dim=-1) < 0.8
         #mask2 = self.get_specular2.mean(dim=-1) < 0.8
         diffuse_new = torch.zeros_like(self._features_dc)
         diffuse_new[mask] = self._features_dc[mask]
@@ -1948,7 +1986,7 @@ class GaussianModel:
                 grads_t = None
 
             self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t)
-            self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t)
+            self.densify_and_split(grads, max_grad, extent, grads_t, max_grad_t)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

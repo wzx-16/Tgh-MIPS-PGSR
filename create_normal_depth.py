@@ -143,9 +143,9 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         # torchvision.utils.save_image(depth_normal, os.path.join(depth_normal_path, '{0:05d}'.format(idx) + ".png"))
         # predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
         # torchvision.utils.save_image(predicted_depth_image, os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".png"))
-        print(os.path.join(predicted_normal_path, viewpoint_cam.image_path[-12:-4] + ".npy"))
-        np.save(os.path.join(predicted_depth_path, viewpoint_cam.image_path[-12:-4] + ".npy"), predicted_depth)
-        np.save(os.path.join(predicted_normal_path, viewpoint_cam.image_path[-12:-4] + ".npy"), predicted_normal)
+        print(os.path.join(predicted_normal_path, viewpoint_cam.image_name.split("/")[-1] + ".npy"))
+        np.save(os.path.join(predicted_depth_path, viewpoint_cam.image_name.split("/")[-1] + ".npy"), predicted_depth)
+        np.save(os.path.join(predicted_normal_path, viewpoint_cam.image_name.split("/")[-1] + ".npy"), predicted_normal)
         # render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         # torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
 

@@ -50,6 +50,11 @@ from transformers import pipeline
 from diffusers import DiffusionPipeline
 import diffusers
 
+def entropy_loss(alpha):
+    loss = -alpha * torch.log(alpha + 1e-10) - (1 - alpha) * torch.log(1 - alpha + 1e-10)
+    loss = torch.mean(loss)
+    return loss
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size):
     
@@ -70,11 +75,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         time_duration = [time_duration[0] / dataset.frame_ratio,  time_duration[1] / dataset.frame_ratio]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     first_iter = 0
-    # tb_writer = prepare_output_and_logger(dataset)
+    id = 1
+    tb_writer = prepare_output_and_logger(dataset)
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
     gaussians.init_light_env()
-    scene = Scene(dataset, gaussians, tgh, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
+    scene = Scene(dataset, gaussians, tgh, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration, eid=id)
     
     #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
     
@@ -188,7 +194,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 #render_start = time.time()
-                if iteration < 3000:
+                if iteration < 0:
                     with Image.open(viewpoint_cam.image_path.replace("images", "images_delight")) as image_load:
                         im_data = np.array(image_load.convert("RGBA"))#[100:-100, 100:-100]
                     norm_data = im_data / 255.0
@@ -234,19 +240,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #time_range3 = time_range**3
                 # if iteration >= 3000 and iteration < 5000:
                 #     xyz = gaussians.get_xyz.detach() + gaussians.get_velocity.detach() * time_range / (gaussians.get_sigma_t + 1)
-                xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
-                if iteration >= 3000 and iteration < 5000:
-                    xyz = xyz.detach()
+                xyz = gaussians.get_xyz# + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
+                # if iteration >= 3000 and iteration < 5000:
+                #     xyz = xyz.detach()
                 #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
-                mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-                opacity = gaussians.get_opacity * mt
+                #mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+                opacity = gaussians.get_opacity# * mt
                 # plt.hist(opacity[t_tree_model.t_tree[0].shape[0]:].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 shs = gaussians.get_features
-                # ma = torch.ones_like(opacity[..., 0], dtype=torch.bool, device=opacity.device)
-                ma = (mt > 0.05).squeeze()
+                #ma = torch.ones_like(opacity[..., 0], dtype=torch.bool, device=opacity.device)
+                ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
+                # if iteration > 1500:
+                #     ma = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+                #     ma = ma < (1 - 0.3)
+                    #print(ma.shape)
+                
+                #ma = (mt > 0.05).squeeze()
                 # plt.hist(opacity[ma].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 #background = torch.rand(3, device="cuda")
@@ -263,19 +275,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # random_color[2, :, :] = background[2]
                 # gt_image = gt_image * loaded_mask + random_color * sky_mask_percentage
                 # print("gaussiansize")
-                print(xyz.size())
+                #print(xyz.size())
                 # print(opacity.size())
                 #gaussians.brdf_mlp.build_mips()
                 #gaussians.brdf_mlp_2.build_mips()
                 view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
                 d_viewdir_normalized = safe_normalize(view_pos - xyz)
                 normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
-                normal = normal + gaussians.get_delta_normal
+                # print("normal", normal.size())
+                # print("delta normal", gaussians.get_delta_normal.size())
+                # if iteration > 20000:
+                #     normal = normal + gaussians.get_delta_normal
                 reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
                 dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
                 dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+
+                ENV_CENTER = torch.tensor([-0.2270, 1.9700, 1.7740], device='cuda')
+                ENV_RADIUS = 0.974
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration)
+                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, ENV_CENTER=ENV_CENTER, ENV_RADIUS=ENV_RADIUS)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -291,10 +309,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # render_end = time.time()
                 # torch.cuda.synchronize()
                 # print(f"render time {render_end - render_start:.6f} second")
-                if iteration % 100 == 0:
+                if iteration % 100 == 0 or (iteration >= 700 and iteration < 720):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    cv2.imwrite("./test/debug_render_{}.jpg".format(timestamp + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
-                
+                    cv2.imwrite("./test{}/debug_render_{}.jpg".format(id, timestamp + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
+                    print(xyz.size())
                 #loss_start = time.time()
                 # Loss
                 Ll1 = l1_loss(image, gt_image)
@@ -316,9 +334,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # lp_resize = fn_lpips(image_resize, gt_image_resize, normalize=True)
                 #loss = loss + 0.01 * lp.mean()
                 #print("loss 1", loss)
-                weight_conf = 1.0 - get_img_grad_weight(gt_image)
-                decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 20000:
+                #weight_conf = 1.0 - get_img_grad_weight(gt_image)
+                #decay_weight = get_decay_weight(15000, 30000, iteration)
+                if iteration < 0:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -333,23 +351,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     avg_diff_render = torch.mean(torch.abs(render_depth - render_depth.median()))
                     render_depth_norm = (render_depth - render_depth.median()) / avg_diff_render
                     depth_grad = (1 - get_img_grad_weight_grey(predicted_depth)).detach()
-                    if iteration < 1000:
+                    if iteration < 500:
                         pass
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
-                    elif iteration < 20000:
-                        loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
-                    elif iteration < 15000:
-                        loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     elif iteration < 30000:
-                        loss += 0.3 * decay_weight * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
+                        loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
+                    # elif iteration < 15000:
+                    #     loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
+                    # elif iteration < 30000:
+                    #     loss += 0.3 * decay_weight * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     if iteration % 100 == 1:
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
                         torchvision.utils.save_image(render_depth_image, "render_depth.png")
                         torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
 
-                if iteration < 20000:
+                if iteration < 0:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -386,29 +404,56 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print("depth size", predicted_depth.shape)
                     #depth_grad = get_img_grad_weight_grey(predicted_depth)
                     #print("depth grad", depth_grad.shape)
-                    if iteration < 1000:
+                    if iteration < 500:
                         pass
-                    elif iteration < 20000:
-                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
-                    elif iteration < 15000:
-                        loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
-                        #loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
                     elif iteration < 30000:
-                        loss += 0.02 * decay_weight * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
-                        #loss += 0.01 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
+                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                    # elif iteration < 15000:
+                    #     loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                    #     #loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
+                    # elif iteration < 30000:
+                    #     loss += 0.02 * decay_weight * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                    #     #loss += 0.01 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
 
-                    if iteration >= 20000 and iteration < 15000:
-                        loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
-                    elif iteration >= 20000:
-                        loss += 0.02 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
+                    # if iteration >= 20000 and iteration < 15000:
+                    #     loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
+                    # elif iteration >= 20000:
+                    #     loss += 0.02 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
                     if iteration % 100 == 1:
                     #predicted_normal_image = (predicted_normal - predicted_normal.min()) / (predicted_normal.max() - predicted_normal.min())
                     #render_normal_image = (render_normal - render_normal.min()) / (render_normal.max() - render_normal.min())
                         # render_normal_norm[0, 0:30, 0:30] = 0
                         # render_normal_norm[1, 0:30, 0:30] = 1
                         # render_normal_norm[2, 0:30, 0:30] = 0
-                        torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
+                        #torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
                         torchvision.utils.save_image((normal_norm + 1) / 2, "predicted_normal.png")
+                render_depth = render_pkg["depth"]
+                #print("render depth", render_depth.shape)
+                #torchvision.utils.save_image(feature_grad, "feature_grad.png")
+                #print("depth grad size", depth_grad.size())
+                #print("feature grad size", feature_grad.size())
+                if iteration < 0:
+                    #print(0.001 * (feature_grad * depth_grad).mean())
+                    depth_grad = (1 - get_img_grad_weight_grey(render_depth.squeeze())).detach()
+                    feature_grad = get_img_grad_weight(render_pkg["rendered_feature"])
+                    loss += 0.1 * (feature_grad * depth_grad).mean()
+                if iteration % 100 == 1:
+                    #torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
+                    render_normal = render_pkg["rendered_normal"]
+                    render_normal_norm = torch.nn.functional.normalize(render_normal, dim=0, eps=1e-6)
+                    torchvision.utils.save_image((render_normal_norm + 1) / 2, f"render_normal{id}.png")
+                    feature_map = render_pkg["rendered_feature"].detach()[:3, :, :]
+                    torchvision.utils.save_image((feature_map + 1) / 2, f"render_feature{id}.png")
+                    if iteration > 1500:
+                        specular_image = render_pkg["rendered_spec"].detach()[:3, :, :]
+                        print("spec image", specular_image.shape)
+                        #print(specular_image[:, 0:10, 0:10])
+                        torchvision.utils.save_image(specular_image, f"render_specular{id}.png")
+                        diff_image = render_pkg["rendered_diff"].detach()[:3, :, :]
+                        torchvision.utils.save_image(diff_image, f"render_diffuse{id}.png")
+                        rendered_outside = render_pkg["rendered_outside"].detach()[:3, :, :]
+                        torchvision.utils.save_image(rendered_outside, f"render_outside{id}.png")
+
                 #print("loss 2", loss)
                 #depth_image = depth_image.detach().cpu().numpy() * 255
                 # depth_image = depth_image.detach().cpu().numpy() * 255
@@ -476,11 +521,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # ########################
                 #loss += 0.1 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                 # _, cov_t = gaussians.get_current_cov_and_mean_t()
-                cov_t = gaussians.get_sigma_t
-                effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                #cov_t = gaussians.get_sigma_t
+                #effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
-                loss += 0.1 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
+                #loss += 0.1 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
                 #loss += 0.1 * torch.clip(5 - effect_range, min = 0.0).mean()
                 # print(loss, '2')
                 #loss += 0.1 * (gaussians.get_opacity[gaussians.get_opacity>0.5] * gaussians.get_opacity[gaussians.get_opacity>0.5].detach() - 0.0).clip(min=0.0).mean()
@@ -494,7 +539,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     sorted_scale, _ = torch.sort(scale, dim=-1)
                     min_scale_loss = sorted_scale[...,0]
                     loss += 100 * min_scale_loss.mean()
-                    loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
+                    #loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                     #loss += 0.001 * (gaussians.get_velocity / (gaussians.get_sigma_t + 1)).abs().mean()  # encourage velocity to be small
                     #velocity_norm = torch.norm(gaussians.get_velocity.detach(), p=2, dim=1).unsqueeze(1)
                     #velocity_norm2 = torch.norm(gaussians.get_velocity2.detach(), p=2, dim=1).unsqueeze(1)
@@ -506,7 +551,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # single-view loss
                 if iteration > 500:
-                    if iteration < 20000:
+                    if iteration < 30000:
                         weight = 0.1
                     else:
                         weight = 0.05
@@ -550,12 +595,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     loss += (normal_loss)# + (((normal_image - normal)).abs().sum(0)).mean()
                     #loss += normal_grad_loss
                     loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
-                    if iteration <= 20000:
-                        loss += (-opacity * torch.log(opacity)).mean() * 0.1
-                    elif iteration <= 15000:
-                        loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5
-                    else:
-                        loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5 * decay_weight
+                    density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
+                    loss += density_loss * 0.001
+                    # if iteration <= 30000:
+                    #     loss += (-opacity * torch.log(opacity)).mean() * 0.1
+                    # elif iteration <= 15000:
+                    #     loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5
+                    # else:
+                    #     loss += (-gaussians.get_opacity * torch.log(gaussians.get_opacity)).mean() * 0.5 * decay_weight
                         #loss += normal_grad_loss
                     if iteration >= 1000:
                         loss += 0.01 * (gaussians.get_delta_normal**2).mean()
@@ -586,7 +633,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     batch_t_grad = batch_t_grad.unsqueeze(1)
             else:
                 if gaussians.gaussian_dim == 4:
-                    batch_t_grad = gaussians._t.grad.clone().detach()
+                    #batch_t_grad = gaussians._t.grad.clone().detach()
+                    batch_t_grad = torch.zeros_like(gaussians._t)
+                    #batch_t_grad = None
             
             iter_end.record()
             loss_dict = {"Ll1": Ll1,
@@ -636,7 +685,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
                     scene.tgh.clear_tgh()
                     scene.tgh.create_from_gaussians(gaussians)
-                    scene.save(iteration, opt, tgh)
+                    scene.save(iteration, opt, tgh, id)
 
                 # Densification
                 if iteration < opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
@@ -647,7 +696,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     else:
                         gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
                         
-                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and (iteration < 3000 or iteration > 6000):
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, opt.densify_grad_t_threshold)
@@ -657,14 +706,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.reset_opacity()
                         tgh.reset_opacity()
 
-                if iteration == 500000:
-                    tgh.reset_diffuse()
-                    gaussians.reset_diffuse()
-                        
+                # if iteration == 700:
+                #     #tgh.reset_diffuse()
+                #     print("reset diffuse")
+                #     #gaussians.reset_diffuse()
+                
+                # if iteration % 1500 == 1:
+                #     gaussians.reset_scale()
+
                 # Optimizer step
                 if iteration < opt.iterations:
                     # copy_and_cat_engine.waitGroupCompletion(0, 0)
                     gaussians.optimizer.step()
+
+                    # with torch.no_grad():
+                    #     target_val = math.log(0.001)
+                    #     min_indices = torch.min(gaussians._scaling, dim=1)[1].unsqueeze(1)
+                    #     gaussians._scaling.scatter_(1, min_indices, target_val)
+
                     gaussians.optimizer.zero_grad(set_to_none = True)
                     # if pipe.env_map_res and iteration < pipe.env_optimize_until:
                     #     env_map_optimizer.step()
@@ -851,7 +910,7 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(2000,args.iterations + 1,2000)]
+    args.save_iterations = args.save_iterations + [i for i in range(5000,args.iterations + 1,5000)]
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)

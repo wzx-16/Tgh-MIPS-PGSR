@@ -27,7 +27,7 @@ class Scene:
     gaussians : GaussianModel
     tgh : TemperalGaussianHierarchy
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False, skip_render=False):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False, skip_render=False, eid=0):
         """b
         :param path: Path to colmap scene main folder.
         """
@@ -98,11 +98,11 @@ class Scene:
             if env_map is not None:
                 self.gaussians.env_map = env_map.cuda()
             self.gaussians.active_sh_degree_t = active_sh_degree_t
-            cubemap_weights_path = os.path.join(self.model_path, "cubemap/iteration_20000/cubemap.pth")
+            cubemap_weights_path = os.path.join(self.model_path, f"cubemap{eid}/iteration_30000/cubemap.pth")
             #cubemap_weights_2_path = os.path.join(self.model_path, "cubemap_2/iteration_20000/cubemap.pth")
             #self.gaussians.brdf_mlp = load_env(torch.load(cubemap_weights_path))
-            self.gaussians.light_mlp = torch.load(args.model_path + 'light/iteration_'+str(20000)+'/light_mlp.pt', weights_only=False)
-            self.gaussians.dir_encoding = torch.load(args.model_path + 'dir/iteration_'+str(20000)+'/dir_encoding.pt', weights_only=False)
+            self.gaussians.light_mlp = torch.load(args.model_path + f'light{eid}/iteration_'+str(30000)+'/light_mlp.pt', weights_only=False)
+            self.gaussians.dir_encoding = torch.load(args.model_path + f'dir{eid}/iteration_'+str(30000)+'/dir_encoding.pt', weights_only=False)
             #self.gaussians.brdf_mlp_2 = load_env(torch.load(cubemap_weights_2_path))
         elif skip_render:
             pass
@@ -118,19 +118,19 @@ class Scene:
                 #pass
                 #self.tgh.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
-    def save(self, iteration, opt, tgh):
+    def save(self, iteration, opt, tgh, id):
         #torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt1_" + str(iteration) + ".pth")
         #tgh.create_from_gaussians(gaussians)
-        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + "/tgh_chkpnt" + str(iteration) + ".pth")
-        brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp/iteration_{iteration}/brdf_mlp.hdr")
+        torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + f"/tgh{id}_chkpnt" + str(iteration) + ".pth")
+        brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp{id}/iteration_{iteration}/brdf_mlp.hdr")
         #brdf_mlp_2_path = os.path.join(self.model_path, f"brdf_mlp_2/iteration_{iteration}/brdf_mlp.hdr")
         mkdir_p(os.path.dirname(brdf_mlp_path))
         #mkdir_p(os.path.dirname(brdf_mlp_2_path))
         #save_env_map(brdf_mlp_path, self.gaussians.brdf_mlp)
         #save_env_map(brdf_mlp_2_path, self.gaussians.brdf_mlp_2)
-        cubemap_path = os.path.join(self.model_path, "cubemap/iteration_{}".format(iteration))
-        light_path = os.path.join(self.model_path, "light/iteration_{}".format(iteration))
-        dir_path = os.path.join(self.model_path, "dir/iteration_{}".format(iteration))
+        cubemap_path = os.path.join(self.model_path, f"cubemap{id}/iteration_{iteration}")
+        light_path = os.path.join(self.model_path, f"light{id}/iteration_{iteration}")
+        dir_path = os.path.join(self.model_path, f"dir{id}/iteration_{iteration}")
         #cubemap_2_path = os.path.join(self.model_path, "cubemap_2/iteration_{}".format(iteration))
         os.makedirs(cubemap_path, exist_ok=True)
         os.makedirs(light_path, exist_ok=True)

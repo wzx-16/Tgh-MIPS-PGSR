@@ -22,7 +22,7 @@ WARNED = False
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.width, cam_info.height# cam_info.image.size
 
-    if args.resolution in [1, 2, 3, 4, 8]:
+    if args.resolution in [1, 2, 3, 4, 6, 8]:
         resolution = round(orig_w/(resolution_scale * args.resolution)), round(orig_h/(resolution_scale * args.resolution))
         scale = resolution_scale * args.resolution
     else:  # should be a type that converts to float
