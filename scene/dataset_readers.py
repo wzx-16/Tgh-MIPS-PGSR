@@ -109,7 +109,10 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         image_path = os.path.join(images_folder, os.path.basename(extr.name))
         image_name = os.path.basename(image_path).split(".")[0]
-        image = Image.open(image_path)
+        if os.path.exists(image_path):
+            image = Image.open(image_path)
+        else:
+            image = None
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=None,
                               image_path=image_path, image_name=image_name, width=width, height=height, fl_x=focal_length_x, fl_y=focal_length_y, cx=width/2, cy=height/2)
@@ -183,16 +186,16 @@ def storePly(path, xyz, rgb):
     ply_data.write(path)
 
 def readColmapSceneInfo(path, images, eval, llffhold=8, num_pts_ratio=1.0):
-    try:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
-        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
-    except:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
-        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+    # try:
+    #     cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+    #     cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+    #     cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+    #     cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    # except:
+    cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+    cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+    cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+    cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
     reading_dir = "images" if images == None else images
     cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))

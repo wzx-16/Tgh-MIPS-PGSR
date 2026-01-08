@@ -231,9 +231,16 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 
 	// Apply low-pass filter: every Gaussian should be at least
 	// one pixel wide/high. Discard 3rd row and column.
+	const float det_0 = max(1e-6, cov[0][0] * cov[1][1] - cov[0][1] * cov[0][1]);
+	const float det_1 = max(1e-6, (cov[0][0] + 0.3f) * (cov[1][1] + 0.3f) - cov[0][1] * cov[0][1]);
+	float coef = sqrt(det_0 / (det_1+1e-6) + 1e-6);
+
+	if (det_0 <= 1e-6 || det_1 <= 1e-6){
+		coef = 0.0f;
+	}
 	cov[0][0] += 0.3f;
 	cov[1][1] += 0.3f;
-	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]),  float(coef)};
 }
 
 // Forward method for converting scale and rotation properties of each
@@ -446,7 +453,7 @@ __global__ void preprocessCUDA(int P, int D, int D_t, int M,
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
 
 	// Compute 2D screen-space covariance matrix
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
 
 	// Invert covariance (EWA algorithm)
 	float det = (cov.x * cov.z - cov.y * cov.y);
@@ -489,7 +496,7 @@ __global__ void preprocessCUDA(int P, int D, int D_t, int M,
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
-	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacity };
+	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacity * cov.w };
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
 

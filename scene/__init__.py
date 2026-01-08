@@ -98,11 +98,14 @@ class Scene:
             if env_map is not None:
                 self.gaussians.env_map = env_map.cuda()
             self.gaussians.active_sh_degree_t = active_sh_degree_t
-            cubemap_weights_path = os.path.join(self.model_path, f"cubemap{eid}/iteration_30000/cubemap.pth")
+            #cubemap_weights_path = os.path.join(self.model_path, f"cubemap{eid}/iteration_30000/cubemap.pth")
             #cubemap_weights_2_path = os.path.join(self.model_path, "cubemap_2/iteration_20000/cubemap.pth")
             #self.gaussians.brdf_mlp = load_env(torch.load(cubemap_weights_path))
-            self.gaussians.light_mlp = torch.load(args.model_path + f'light{eid}/iteration_'+str(30000)+'/light_mlp.pt', weights_only=False)
-            self.gaussians.dir_encoding = torch.load(args.model_path + f'dir{eid}/iteration_'+str(30000)+'/dir_encoding.pt', weights_only=False)
+            iteration = args.loaded_pth.split("chkpnt")[-1].split(".pth")[0]
+            self.gaussians.light_mlp = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp.pt', weights_only=False)
+            self.gaussians.light_mlp2 = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp2.pt', weights_only=False)
+            self.gaussians.dir_encoding = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding.pt', weights_only=False)
+            self.gaussians.dir_encoding2 = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding2.pt', weights_only=False)
             #self.gaussians.brdf_mlp_2 = load_env(torch.load(cubemap_weights_2_path))
         elif skip_render:
             pass
@@ -138,7 +141,9 @@ class Scene:
         #os.makedirs(cubemap_2_path, exist_ok=True)
         #torch.save(self.gaussians.brdf_mlp.base, os.path.join(cubemap_path, 'cubemap.pth'))
         torch.save(self.gaussians.light_mlp, os.path.join(light_path,'light_mlp.pt'))
+        torch.save(self.gaussians.light_mlp2, os.path.join(light_path,'light_mlp2.pt'))
         torch.save(self.gaussians.dir_encoding, os.path.join(dir_path,'dir_encoding.pt'))
+        torch.save(self.gaussians.dir_encoding2, os.path.join(dir_path,'dir_encoding2.pt'))
         #torch.save(self.gaussians.brdf_mlp_2.base, os.path.join(cubemap_2_path, 'cubemap.pth'))
 
     def getTrainCameras(self, scale=1.0):

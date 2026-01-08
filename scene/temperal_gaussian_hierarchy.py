@@ -180,16 +180,16 @@ class TemperalGaussianHierarchy():
         # update_end = time.time()
         # print(f"update_time:{update_end - update_start:.6f} seconds")
 
-    def reset_opacity(self):
+    def reset_opacity(self, mask=None):
         current_length = self.min_layer_length
         for level in range(self.level_count, 0, -1):
             segment_count = (math.ceil((self.time_duration[1] - self.time_duration[0]) / current_length)) + 1
             for ind in range(segment_count):
-                self.layers[level][ind].reset_opacity_cpu()
+                self.layers[level][ind].reset_opacity_cpu(mask)
 
             current_length = current_length * 2
             
-        self.layers[0][0].reset_opacity_cpu()
+        self.layers[0][0].reset_opacity_cpu(mask)
     
     def reset_diffuse(self):
         current_length = self.min_layer_length

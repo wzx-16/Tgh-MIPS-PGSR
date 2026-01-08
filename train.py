@@ -50,14 +50,42 @@ from transformers import pipeline
 from diffusers import DiffusionPipeline
 import diffusers
 
+
+# class NearViewsBatchSampler(torch.utils.data.Sampler):
+#     def __init__(self, data_source, batch_size):
+#         self.data_source = data_source
+#         self.batch_size = batch_size
+#         self.cameras = data_source.viewpoint_stack
+        
+#         centers = torch.stack([cam.camera_center for cam in self.cameras]).cpu() # N, 3
+#         self.dists = torch.cdist(centers, centers) 
+                
+#     def __iter__(self):
+#         num_batches = len(self.data_source) // self.batch_size
+#         for _ in range(num_batches):
+#             pivot_idx = torch.randint(0, len(self.data_source), (1,)).item()
+#             d = self.dists[pivot_idx]
+#             _, indices = torch.topk(d, self.batch_size, largest=False)
+#             yield indices.tolist()
+            
+#     def __len__(self):
+#         return len(self.data_source) // self.batch_size
+
 def entropy_loss(alpha):
     loss = -alpha * torch.log(alpha + 1e-10) - (1 - alpha) * torch.log(1 - alpha + 1e-10)
     loss = torch.mean(loss)
     return loss
 
+def get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS):
+    if ENV_CENTER is None or ENV_RADIUS is None:
+        #print("mask", (torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)).size())
+        return torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)
+    #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
+    return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
-             gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size):
-    
+             gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id, near_views):
+    print("batch size:", batch_size, "near views:", near_views)
     # import os, torch, torch.nn as nn
     # print("torch:", torch.__version__, "cuda:", torch.version.cuda, "cudnn:", torch.backends.cudnn.version())
     # print("cuda_available:", torch.cuda.is_available(), "cudnn_available:", torch.backends.cudnn.is_available())
@@ -75,7 +103,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         time_duration = [time_duration[0] / dataset.frame_ratio,  time_duration[1] / dataset.frame_ratio]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     first_iter = 0
-    id = 1
+    print("training id:", id)
     tb_writer = prepare_output_and_logger(dataset)
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
@@ -121,10 +149,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #scene.tgh.create_from_gaussians(gaussians, opt)
     # gaussian_init_flag = False
     training_dataset = scene.getTrainCameras()
-    training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
+    if near_views:
+        training_dataloader = DataLoader(training_dataset, batch_sampler=NearViewsBatchSampler(training_dataset, batch_size), num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, pin_memory=True)
+    else:
+        training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
     #print("test6")
     iteration = first_iter
-    #fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
+    fn_lpips = lpips.LPIPS(net='vgg').cuda().eval()
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     #depth_guidance_checkpoint = "LiheYoung/depth-anything-base-hf"
     #pipe_depth = pipeline("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
@@ -162,7 +193,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             gaussians.update_learning_rate(iteration)
             
             # Every 1000 its we increase the levels of SH up to a maximum degree
-            if iteration % opt.sh_increase_interval == 0:
+            if iteration % opt.sh_increase_interval == 0 and iteration > 3000:
                 gaussians.oneupSHdegree()
                 
             # Render
@@ -194,7 +225,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 #render_start = time.time()
-                if iteration < 0:
+                if iteration < 3000:
                     with Image.open(viewpoint_cam.image_path.replace("images", "images_delight")) as image_load:
                         im_data = np.array(image_load.convert("RGBA"))#[100:-100, 100:-100]
                     norm_data = im_data / 255.0
@@ -251,11 +282,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # plt.hist(opacity[t_tree_model.t_tree[0].shape[0]:].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 shs = gaussians.get_features
+                scaling = gaussians.get_scaling
+                rotation = gaussians.get_rotation
+                delta_normal = gaussians.get_delta_normal
+                
+                detach_geo = False
+                # if iteration < 3000 and iteration >= 2000:
+                #     detach_geo = True
+                
+                if detach_geo:
+                    xyz = xyz.detach()
+                    opacity = opacity.detach()
+                    scaling = scaling.detach()
+                    rotation = rotation.detach()
+                    delta_normal = delta_normal.detach()
+
                 #ma = torch.ones_like(opacity[..., 0], dtype=torch.bool, device=opacity.device)
                 ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
-                # if iteration > 1500:
+                # if iteration > 30000:
                 #     ma = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
-                #     ma = ma < (1 - 0.3)
+                #     ma = ma < (1 - 0.2)
                     #print(ma.shape)
                 
                 #ma = (mt > 0.05).squeeze()
@@ -284,7 +330,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
                 # print("normal", normal.size())
                 # print("delta normal", gaussians.get_delta_normal.size())
-                # if iteration > 20000:
+                # if iteration > 0:
                 #     normal = normal + gaussians.get_delta_normal
                 reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
                 dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
@@ -293,7 +339,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 ENV_CENTER = torch.tensor([-0.2270, 1.9700, 1.7740], device='cuda')
                 ENV_RADIUS = 0.974
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, ENV_CENTER=ENV_CENTER, ENV_RADIUS=ENV_RADIUS)
+                                    scaling, rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, delta_normal = delta_normal[ma], reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, ENV_CENTER=ENV_CENTER, ENV_RADIUS=ENV_RADIUS)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -305,16 +351,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # reflvec = safe_normalize(reflect(d_viewdir_normalized, render_pkg["rendered_normal"]))
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
-                
+                delta_reflec = render_pkg["delta_reflec"]
+                rendered_feature2 = render_pkg["rendered_feature2"][:3]
+                reflec_dir = render_pkg["reflec_dir"]
+                delta_feature = render_pkg["delta_feature"]
+                ray_d = render_pkg["ray_d"]
+                rendered_gb_normal = render_pkg["rendered_gb_normal"]
                 # render_end = time.time()
                 # torch.cuda.synchronize()
                 # print(f"render time {render_end - render_start:.6f} second")
-                if iteration % 100 == 0 or (iteration >= 700 and iteration < 720):
+                if iteration % 100 == 0:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     cv2.imwrite("./test{}/debug_render_{}.jpg".format(id, timestamp + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
                     print(xyz.size())
                 #loss_start = time.time()
                 # Loss
+                # if iteration >= 3000:
+                #     importance_weight = ((reflec_dir.detach() * rendered_gb_normal.detach()).sum(dim=0) + 0.5)
+                # if 3000 < iteration < 30000:
+                #     Ll1 = l1_loss(image * importance_weight, gt_image * importance_weight)
+                # else:
                 Ll1 = l1_loss(image, gt_image)
                 Lssim = 1.0 - ssim(image, gt_image)
                 loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim
@@ -326,17 +382,42 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # torch.cuda.empty_cache()
                 # gc.collect()
                 #print("image", image.shape, image.dtype, image.device, "gt", gt_image.shape)
-                #lp = fn_lpips(image[None], gt_image[None], normalize=True)
+                lp = fn_lpips(image[None], gt_image[None], normalize=True)
                 #lp = lpips_tiled(image[None], gt_image[None])
                 #print("test9")
                 # gt_image_resize = torch.nn.functional.interpolate(gt_image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # image_resize = torch.nn.functional.interpolate(image[None], size=(1960//2, 3640//2), mode='bilinear')
                 # lp_resize = fn_lpips(image_resize, gt_image_resize, normalize=True)
-                #loss = loss + 0.01 * lp.mean()
+                loss = loss + 0.1 * lp.mean()
                 #print("loss 1", loss)
                 #weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 #decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 0:
+                # delta_reflec = render_pkg["delta_reflec"]
+                # rendered_feature2 = render_pkg["rendered_feature2"]
+                # reflec_dir = render_pkg["reflec_dir"]
+                # ray_d = render_pkg["ray_d"]
+                # rendered_gb_normal = render_pkg["rendered_gb_normal"]
+                rot_contrained_weight = 0.1
+                if iteration >= 3000:
+                    if iteration < 5000:
+                        rot_contrained_weight = 0.1
+                    elif iteration < 30000:
+                        rot_contrained_weight = 0.05
+                    # elif iteration < 20000:
+                    #     rot_contrained_weight = 0.2
+                    # elif iteration < 30000:
+                    #     rot_contrained_weight = 0.1
+                    else:
+                        rot_contrained_weight = 0.02
+                if iteration >= 3000:
+                    if iteration % 100 == 0:
+                        torchvision.utils.save_image((delta_reflec+2.0)/4.0, f'delta_reflec{id}.png')
+                        torchvision.utils.save_image((delta_feature[:3]+2.0)/4.0, f'delta_feature{id}.png')
+                        #torchvision.utils.save_image((rendered_feature2[:3] + 1) / 2, f'rendered_feature2_{id}.png')
+                if iteration >= 5000:
+                    loss += rot_contrained_weight * ((delta_reflec**2).sum(dim=0)).mean()
+                    loss += rot_contrained_weight * ((delta_feature**2).sum(dim=0)).mean()
+                if iteration < 3000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -355,7 +436,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         pass
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
-                    elif iteration < 30000:
+                    else:
                         loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
                     # elif iteration < 15000:
                     #     loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
@@ -367,7 +448,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         torchvision.utils.save_image(render_depth_image, "render_depth.png")
                         torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
 
-                if iteration < 0:
+                if iteration < 3000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -406,7 +487,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print("depth grad", depth_grad.shape)
                     if iteration < 500:
                         pass
-                    elif iteration < 30000:
+                    else:
                         loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     # elif iteration < 15000:
                     #     loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
@@ -444,9 +525,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image((render_normal_norm + 1) / 2, f"render_normal{id}.png")
                     feature_map = render_pkg["rendered_feature"].detach()[:3, :, :]
                     torchvision.utils.save_image((feature_map + 1) / 2, f"render_feature{id}.png")
-                    if iteration > 1500:
+                    torchvision.utils.save_image((rendered_feature2 + 1) / 2, f'rendered_feature2_{id}.png')
+                    if iteration > 30000000:
                         specular_image = render_pkg["rendered_spec"].detach()[:3, :, :]
-                        print("spec image", specular_image.shape)
+                        #print("spec image", specular_image.shape)
                         #print(specular_image[:, 0:10, 0:10])
                         torchvision.utils.save_image(specular_image, f"render_specular{id}.png")
                         diff_image = render_pkg["rendered_diff"].detach()[:3, :, :]
@@ -533,12 +615,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # depth = torch.where(depth.isnan() | depth.isinf(), torch.zeros_like(depth), depth)
                 # loss += (2 - depth[depth < 2]).sum() * 0.01
                 # print(loss, '4', depth[depth < 3].isinf().any())
-                
+                #outside_mask = get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
                 if iteration > 0 and visibility_filter.sum() > 0:
                     scale = gaussians.get_scaling[visibility_filter]
                     sorted_scale, _ = torch.sort(scale, dim=-1)
                     min_scale_loss = sorted_scale[...,0]
                     loss += 100 * min_scale_loss.mean()
+                    outside_mask = get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
+                    scale_out = gaussians.get_scaling[visibility_filter & outside_mask]
+                    sorted_scale_out, _ = torch.sort(scale_out, dim=-1)
+                    large_scale_loss = torch.abs((sorted_scale_out[...,1] - sorted_scale_out[..., 2])).mean()
+                    if iteration < 30000:
+                        loss += 0.1 * large_scale_loss
                     #loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                     #loss += 0.001 * (gaussians.get_velocity / (gaussians.get_sigma_t + 1)).abs().mean()  # encourage velocity to be small
                     #velocity_norm = torch.norm(gaussians.get_velocity.detach(), p=2, dim=1).unsqueeze(1)
@@ -554,7 +642,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration < 30000:
                         weight = 0.1
                     else:
-                        weight = 0.05
+                        weight = 0.1
                     normal = render_pkg["rendered_normal"]
                     depth_normal = render_pkg["depth_normal"]
                     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-20)
@@ -582,8 +670,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #     # cv2.imwrite("./test/debug_render1.png", (((de0-de0.min())/(de0.max()-de0.min())).clip(min=0, max=1).squeeze()[..., None][..., [0]*3].detach().cpu().numpy() * 255).astype(np.uint8))
 
-                    image_weight = (1.0 - get_img_grad_weight(gt_image))
-                    image_weight = (image_weight).clamp(0,1).detach() ** 2
+                    #image_weight = (1.0 - get_img_grad_weight(gt_image))
+                    #image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
                         #normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
@@ -596,7 +684,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #loss += normal_grad_loss
                     loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
                     density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
-                    loss += density_loss * 0.001
+                    if iteration > 10000:
+                        loss += density_loss * 0.001
                     # if iteration <= 30000:
                     #     loss += (-opacity * torch.log(opacity)).mean() * 0.1
                     # elif iteration <= 15000:
@@ -701,17 +790,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, opt.densify_grad_t_threshold)
                     
+                    outside_mask = get_outside_msk(gaussians.get_xyz, ENV_CENTER, ENV_RADIUS)
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     #if iteration % 100 == 0:
+                        #outside_mask = get_outside_msk(gaussians.get_xyz, ENV_CENTER, ENV_RADIUS)
                         gaussians.reset_opacity()
-                        tgh.reset_opacity()
+                        #tgh.reset_opacity(mask=outside_mask)
+                    # if iteration % (opt.opacity_reset_interval * 2) == 0:
+                    #     gaussians.reset_opacity(mask=~outside_mask)
+                        #tgh.reset_opacity()
 
                 # if iteration == 700:
                 #     #tgh.reset_diffuse()
                 #     print("reset diffuse")
                 #     #gaussians.reset_diffuse()
                 
-                # if iteration % 1500 == 1:
+                # if iteration == 30000:
                 #     gaussians.reset_scale()
 
                 # Optimizer step
@@ -880,7 +974,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[1_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[31_000, 61_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--start_checkpoint", type=str, default = None)
     
@@ -893,6 +987,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--exhaust_test", action="store_true")
+    parser.add_argument("--id", type=int, default=0)
+    parser.add_argument("--near_views", action="store_true")
     
     args = parser.parse_args(sys.argv[1:])
     #args.save_iterations.append(args.iterations)
@@ -920,7 +1016,7 @@ if __name__ == "__main__":
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
-             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size)
+             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.id, args.near_views)
 
     # All done
     print("\nTraining complete.")

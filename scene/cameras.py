@@ -60,7 +60,7 @@ class Camera:
         self.image_width = resolution[0]
         self.image_height = resolution[1]
         
-        if not self.meta_only:
+        if not self.meta_only and self.image is not None:
             if gt_alpha_mask is not None:
                 self.image *= gt_alpha_mask.to(self.image.device)
             else:

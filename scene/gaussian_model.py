@@ -168,7 +168,8 @@ class GaussianModel:
         self._albedo_bias = 2
 
         
-        self.sph_dim = 16
+        self.sph_dim = 8
+        self.sph_dim2 = 1
         self.dim = 1
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
@@ -181,10 +182,12 @@ class GaussianModel:
         # nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
 
         self.dir_encoding = None
+        self.dir_encoding2 = None
         self.light_mlp = None
+        self.light_mlp2 = None
 
     def init_light_env(self):
-        n_levels = 9  
+        n_levels = 9 
         plane_size = 2**(n_levels)
         run_dim = 256
         self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
@@ -196,6 +199,7 @@ class GaussianModel:
             nn.Linear(run_dim, 3),
         ).cuda()
 
+
         # for m in self.light_mlp:
         #     if isinstance(m, nn.Linear):
         #         nn.init.xavier_uniform_(m.weight)
@@ -203,6 +207,26 @@ class GaussianModel:
         #             nn.init.constant_(m.bias, 0)
 
         nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
+
+        self.dir_encoding2 = SphMipEncoding(1, 2**1, self.sph_dim2, 1, self.dim, False).cuda()
+        # self.light_mlp2 = nn.Sequential(
+        #     nn.Linear(self.sph_dim2 * 16 + 16, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+
+        self.light_mlp2 = nn.Sequential(
+            nn.Linear(4 + 3 + 3, run_dim // 2),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim//2, run_dim//4),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim // 4, 7),
+        ).cuda()
+        nn.init.constant_(self.light_mlp2[-1].weight, 0)
+        nn.init.constant_(self.light_mlp2[-1].bias, 0)
+        #nn.init.constant_(self.light_mlp2[-1].bias, np.log(0.25))
 
     def capture(self):
         if self.gaussian_dim == 3:
@@ -557,7 +581,7 @@ class GaussianModel:
         if ret_raw:
             scale_new = self.scaling_inverse_activation(scales*rmin_axis)
             # only reset refl gaussians
-            scale_new = self._scaling
+            #scale_new = self._scaling
         else:
             scale_new = scales*rmin_axis
             scale_new = scales
@@ -588,7 +612,7 @@ class GaussianModel:
         self._velocity3 = torch.empty(0, 3, device=self.device)
         self._rot_velocity = torch.empty(0, 4, device=self.device)
         self._specular = torch.empty(0, 3, device=self.device)
-        self._specular2 = torch.empty(0, 4, device=self.device)
+        self._specular2 = torch.empty(0, 20, device=self.device)
         self._delta_normal = torch.empty(0, 3, device=self.device)
         self._roughness = torch.empty(0, 1, device=self.device)
 
@@ -886,7 +910,12 @@ class GaussianModel:
                     continue
                 if group["name"] == "light_mlp":
                     continue
+                if group["name"] == "light_mlp2":
+                    continue
                 if group["name"] == "dir_encoding":
+                    continue
+
+                if group["name"] == "dir_encoding2":
                     continue
                 optimizer_state = gaussians.optimizer.state.get(group["params"][0], None)
                 if optimizer_state is not None:
@@ -1059,7 +1088,7 @@ class GaussianModel:
         
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return self.scaling_activation(self._scaling) + 0.0001
     
     @property
     def get_scaling_t(self):
@@ -1102,6 +1131,7 @@ class GaussianModel:
     @property
     def get_specular2(self):
         return self.specular2_activation(self._specular2)
+        #return self._specular2
     
     @property
     def get_delta_normal(self):
@@ -1189,7 +1219,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
-                specular2 = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+                specular2 = torch.zero((fused_point_cloud.shape[0], 20), device="cuda")
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
@@ -1286,7 +1316,7 @@ class GaussianModel:
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                specular2 = torch.rand((fused_point_cloud.shape[0], 4), device=self.device)
+                specular2 = torch.zero((fused_point_cloud.shape[0], 20), device=self.device)
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1487,7 +1517,7 @@ class GaussianModel:
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
+                    specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                     delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
                     
@@ -1635,7 +1665,9 @@ class GaussianModel:
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
                 #l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
                 l.append({'params': list(self.light_mlp.parameters()), 'lr': training_args.mlp_lr, "name": "light_mlp"})
+                l.append({'params': list(self.light_mlp2.parameters()), 'lr': training_args.mlp_lr, "name": "light_mlp2"})
                 l.append({'params': list(self.dir_encoding.parameters()), 'lr': training_args.encoding_lr, "name": "dir_encoding"})
+                l.append({'params': list(self.dir_encoding2.parameters()), 'lr': training_args.encoding_lr, "name": "dir_encoding2"})
         print("roughness lr", training_args.roughness_lr)
         print("albedo learning rate", training_args.specular_lr)
         print("feature learning rate", training_args.feature_lr)
@@ -1660,6 +1692,10 @@ class GaussianModel:
                                         lr_final=training_args.brdf_mlp_lr_final,
                                         lr_delay_mult=training_args.brdf_mlp_lr_delay_mult,
                                         max_steps=training_args.brdf_mlp_lr_max_steps)
+        self.feature_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr,
+                                        lr_final=training_args.feature_lr / 2,
+                                        lr_delay_mult=training_args.brdf_mlp_lr_delay_mult,
+                                        max_steps=training_args.brdf_mlp_lr_max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -1675,6 +1711,9 @@ class GaussianModel:
             if param_group["name"] == "brdf_mlp":
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
+            # if param_group["name"] == "specular2":
+            #     lr = self.feature_scheduler_args(iteration)
+            #     param_group["lr"] =lr
                 #return lr
             # if param_group["name"] == "velocity2":
             #     lr = self.velocity2_scheduler_args(iteration)
@@ -1689,8 +1728,10 @@ class GaussianModel:
             #     param_group['lr'] = lr
             #     return lr
 
-    def reset_opacity(self):
+    def reset_opacity(self, mask=None):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        if mask is not None:
+            opacities_new[~mask] = self._opacity[~mask]
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -1703,8 +1744,10 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(diffuse_new, "f_dc")
         self._features_dc = optimizable_tensors["f_dc"]
 
-    def reset_opacity_cpu(self):
+    def reset_opacity_cpu(self, mask=None):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        if mask is not None:
+            opacities_new[~mask] = self._opacity[~mask]
         self._opacity = opacities_new
         self.opt_states["opacity"]["exp_avg"] = torch.zeros_like(self._opacity)
         self.opt_states["opacity"]["exp_avg_sq"] = torch.zeros_like(self._opacity)
@@ -1738,7 +1781,11 @@ class GaussianModel:
                 continue
             if group["name"] == "light_mlp":
                 continue
+            if group["name"] == "light_mlp2":
+                    continue
             if group["name"] == "dir_encoding":
+                continue
+            if group["name"] == "dir_encoding2":
                 continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
@@ -1793,7 +1840,11 @@ class GaussianModel:
                 continue
             if group["name"] == "light_mlp":
                 continue
+            if group["name"] == "light_mlp2":
+                    continue
             if group["name"] == "dir_encoding":
+                continue
+            if group["name"] == "dir_encoding2":
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
@@ -1986,7 +2037,7 @@ class GaussianModel:
                 grads_t = None
 
             self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t)
-            self.densify_and_split(grads, max_grad, extent, grads_t, max_grad_t)
+            self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

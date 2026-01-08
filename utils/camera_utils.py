@@ -49,8 +49,17 @@ def loadCam(args, id, cam_info, resolution_scale):
     
     loaded_mask = None
     if not args.dataloader:
-        resized_image_rgb = PILtoTorch(cam_info.image, resolution)
-        gt_image = resized_image_rgb[:3, ...]
+        #resized_image_rgb = PILtoTorch(cam_info.image, resolution)
+        if cam_info.image is not None:
+            resized_image = torch.from_numpy(np.array(cam_info.image)) / 255.0
+            if len(resized_image.shape) == 3:
+                resized_image_rgb = resized_image.permute(2, 0, 1)
+            else:
+                resized_image_rgb = resized_image.unsqueeze(dim=-1).permute(2, 0, 1)
+            gt_image = resized_image_rgb[:3, ...]
+        else:
+            gt_image = None
+            resized_image_rgb = None
 
         # mask_path = os.path.join(cam_info.image_path, os.path.joint("../mattings", cam_info.image_name.split("_")[0]))
         # mask_name = cam_info.image_name.split("_")[-1].split(".")[0] + ".png"
@@ -58,7 +67,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         #     loaded_mask_PIL = image_load.resize((int(orig_w / 2), int(orig_h / 2)))
         # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)) / 255.0
         # loaded_mask = loaded_mask.permute(2, 0, 1)
-        if resized_image_rgb.shape[0] == 4:
+        if resized_image_rgb is not None and resized_image_rgb.shape[0] == 4:
             loaded_mask = resized_image_rgb[3:4, ...]
     else:
         gt_image = cam_info.image
