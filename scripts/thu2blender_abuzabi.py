@@ -53,8 +53,8 @@ if __name__ == '__main__':
     # load data
     images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(args.path, "images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
     #images = [im for im in images if int(im[11:17]) < 42 and int(im[11:17]) >= 32]
-    #images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 60)]
-    images = [im for im in images if (int(im[15:21]) == 0)]
+    #images = [im for im in images if int(im[15:21]) == 0]
+    images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 70)]
     cams = sorted(set([im[7:14] for im in images]))
     #print(images)
     print(cams)
