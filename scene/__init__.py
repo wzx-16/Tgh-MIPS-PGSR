@@ -110,6 +110,9 @@ class Scene:
             #cubemap_weights_2_path = os.path.join(self.model_path, "cubemap_2/iteration_20000/cubemap.pth")
             self.gaussians.brdf_mlp = load_env(torch.load(cubemap_weights_path))
             self.gaussians.light_mlp = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp.pt', weights_only=False)
+            self.gaussians.light_mlp_2 = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp2.pt', weights_only=False)
+            print("Loaded light_mlp:", self.gaussians.light_mlp)
+            print("Loaded light_mlp param size: {}".format(sum(p.numel() for p in self.gaussians.light_mlp.parameters())))
             # self.gaussians.light_mlp2 = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp2.pt', weights_only=False)
             self.gaussians.dir_encoding = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding.pt', weights_only=False)
             # self.gaussians.dir_encoding2 = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding2.pt', weights_only=False)
@@ -148,6 +151,7 @@ class Scene:
         #os.makedirs(cubemap_2_path, exist_ok=True)
         torch.save(self.gaussians.brdf_mlp.base, os.path.join(cubemap_path, 'cubemap.pth'))
         torch.save(self.gaussians.light_mlp, os.path.join(light_path,'light_mlp.pt'))
+        torch.save(self.gaussians.light_mlp_2, os.path.join(light_path,'light_mlp2.pt'))
         torch.save(self.gaussians.dir_encoding, os.path.join(dir_path,'dir_encoding.pt'))
         #torch.save(self.gaussians.brdf_mlp_2.base, os.path.join(cubemap_2_path, 'cubemap.pth'))
 

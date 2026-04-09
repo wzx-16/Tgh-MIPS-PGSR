@@ -18,7 +18,7 @@ from utils.loss_utils import get_img_grad_weight, get_img_grad_weight_grey, get_
 from gaussian_renderer import render, render_3d_pgsr_anti
 import sys
 from scene import Scene, GaussianModel, TemperalGaussianHierarchy
-from utils.general_utils import safe_state, safe_normalize, reflect
+from utils.general_utils import safe_state, safe_normalize, reflect, inverse_sigmoid
 import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr, easy_cmap
@@ -49,6 +49,18 @@ except ImportError:
 from transformers import pipeline
 from diffusers import DiffusionPipeline
 import diffusers
+
+def get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS):
+    if ENV_CENTER is None or ENV_RADIUS is None:
+        #print("mask", (torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)).size())
+        return torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)
+    #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
+    return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
+
+def entropy_loss(alpha):
+    loss = -alpha * torch.log(alpha + 1e-10) - (1 - alpha) * torch.log(1 - alpha + 1e-10)
+    loss = torch.mean(loss)
+    return loss
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id):
@@ -145,7 +157,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #             area += a
     #     return total/area
     #print("test7")
+    densification_interval = opt.densification_interval
     while iteration < opt.iterations + 1:
+        if iteration <= 3000:
+            densification_interval = 100
+        elif iteration < 15000:
+            densification_interval = 200
+        elif iteration < 25000:
+            densification_interval = 500
+        else:
+            densification_interval = 500
         for batch_data in training_dataloader:
             #train_start = time.time()
             iteration += 1
@@ -158,7 +179,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Every 1000 its we increase the levels of SH up to a maximum degree
             if iteration % opt.sh_increase_interval == 0:
                 gaussians.oneupSHdegree()
-                
+            
+
             # Render
             if (iteration - 1) == debug_from:
                 pipe.debug = True
@@ -200,6 +222,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     resized_image_rgb = image_load.permute(2, 0, 1)
                     viewpoint_image = resized_image_rgb[:3, ...].clamp(0.0, 1.0)
                     gt_image = viewpoint_image
+                # if iteration < 5000:
+                #     normal_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_normal", viewpoint_cam.image_name + ".npy"))
+                #     #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+                #     if os.path.exists(normal_path):
+                #         predicted_normal = np.load(normal_path)
+                #     else:
+                #         predicted_normal = None
+                #     #normal = None
+
+                #     depth_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_depth", viewpoint_cam.image_name + ".npy"))
+                #     #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+                #     if os.path.exists(depth_path):
+                #         predicted_depth = np.load(depth_path)
+                #     else:
+                #         predicted_depth = None
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
                 #loaded_mask = loaded_mask.cuda()
@@ -232,8 +269,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # time_range3 = time_range_offset**2 * time_range
                 #time_range2 = time_range**2
                 #time_range3 = time_range**3
-                # if iteration >= 3000 and iteration < 5000:
+                # if 15000 < iteration <= opt.densify_until_iter and iteration % densification_interval < 100:
                 #     xyz = gaussians.get_xyz.detach() + gaussians.get_velocity.detach() * time_range / (gaussians.get_sigma_t + 1)
+                # else:
                 xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
                 # if iteration >= 3000 and iteration < 5000:
                 #     xyz = xyz.detach()
@@ -241,12 +279,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+                # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+                # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+                # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+                #mt = torch.sigmoid((mt - 0.5) * 14)
+                # print("mt size and specular size", mt.shape, gaussians.get_specular[..., 0:1].shape)
+                # print("specular max", gaussians.get_specular[..., 0:1].max())
+                # print("specular origin max", gaussians._specular[..., 0:1].max())
+                # print("mt max", mt.max())
                 opacity = gaussians.get_opacity * mt
+                opacity_render = opacity
+                # sigma_noise = 0.8  # 0.8
+                # epsilon_opacity = torch.randn_like(opacity, device=opacity.device) * sigma_noise
+                # epsilon_opacity = torch.clamp(epsilon_opacity, min=-sigma_noise, max=sigma_noise)  # 根据实际训练经验设定合理范围
+                # opacity = torch.clamp(opacity * (1.0 + epsilon_opacity), min=0.0, max=1.0)
+                #opacity = torch.sigmoid((opacity - 0.5) * 14)
                 # plt.hist(opacity[t_tree_model.t_tree[0].shape[0]:].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 shs = gaussians.get_features
                 # ma = torch.ones_like(opacity[..., 0], dtype=torch.bool, device=opacity.device)
+                # drop_mask = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
+                # if iteration <= 5000:
+                #     pass
+                # elif iteration <= 15000:
+                #     drop_mask = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+                #     drop_mask = drop_mask < (1 - 0.1)
+                # elif iteration <= 30000:
+                #     drop_mask = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+                #     drop_mask = drop_mask < (1 - 0.2)
+                # else:
+                #     drop_mask = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+                #     drop_mask = drop_mask < (1 - 0.3)
+                    # drop_mask = torch.ones(gaussians.get_opacity.shape[0], dtype=torch.bool, device=gaussians.get_opacity.device)
+                #opacity = opacity * (drop_mask.float() + 0.6).clamp(0, 1).unsqueeze(-1)
+                #ma = torch.logical_and(drop_mask, (mt > 0.05).squeeze())
                 ma = (mt > 0.05).squeeze()
+                # mask_drop = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
+                # drop_ratio = 0.1 + ((iteration - 10000) * 0.1) / (30000 - 10000)
+                # if iteration <= 10000:
+                #     pass
+                # else:
+                #     mask_drop = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+                #     mask_drop = mask_drop < (1 - drop_ratio)
+                #ma = ma & mask_drop
                 # plt.hist(opacity[ma].detach().cpu().numpy(), bins=100, range=(0, 1))
                 # plt.show()
                 #background = torch.rand(3, device="cuda")
@@ -274,7 +349,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
                 dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
                 dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-                render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
+                render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
                                     gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
@@ -294,10 +369,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 spec_coeff = render_pkg["spec_coeff"]
                 # if iteration > 3000:
                 #     loss += 0.5 * ((1 - spec_coeff).mean())
-                if iteration % 100 == 0:
+                if iteration % 50 == 0:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     cv2.imwrite("./test{}/debug_render_{}.jpg".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
-                    print(xyz.size())
+                    if iteration % 100 == 0:
+                        print(xyz.size())
                     # if iteration > 3000:
                     #     torchvision.utils.save_image(spec_coeff, "spec_coeff.png")
                 feature_map = render_pkg["feature_map"]
@@ -328,7 +404,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # loss += 0.1 * ((1 - spec_coeff).mean())
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 5000:
+                if iteration < 0:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -359,7 +435,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         torchvision.utils.save_image(render_depth_image, "render_depth.png")
                         torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
 
-                if iteration < 5000:
+                if iteration < 0:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -487,10 +563,34 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #loss += 0.1 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                 # _, cov_t = gaussians.get_current_cov_and_mean_t()
                 cov_t = gaussians.get_sigma_t
+                #effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                # min_opa_inversigmoid = torch.log(torch.tensor(0.05, device="cuda") / (1 - 0.05)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
+                # high_opa_inversigmoid = torch.log(torch.tensor(0.95, device="cuda") / (1 - 0.95)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
+
+                # min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                # max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+
                 effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
+                # effect_range = torch.sqrt(-2 * torch.log(min_opa_inversigmoid) * cov_t)
+                # high_opa_effect_range = torch.sqrt(-2 * torch.log(high_opa_inversigmoid) * cov_t)
+
+                # effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
+                # high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
+
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
                 loss += 0.1 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
+                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 16, min=0.0).mean()
+                #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 6, min=0.0).mean()
+                #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 2, min=0.0).mean()
+                #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
+                #loss += 1 * torch.clip(gaussians.get_t - 2.4, min = 0.0).mean()
+                #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - 1.6666666666666667, min = 0.0).mean()
+                loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
+                #loss += 1 * torch.clip(2.4 - gaussians.get_t, min = 0.0).mean()
+                #loss += 1 * torch.clip(2.3666666666666667 - gaussians.get_t, min = 0.0).mean()
                 #loss += 0.1 * torch.clip(5 - effect_range, min = 0.0).mean()
                 # print(loss, '2')
                 #loss += 0.1 * (gaussians.get_opacity[gaussians.get_opacity>0.5] * gaussians.get_opacity[gaussians.get_opacity>0.5].detach() - 0.0).clip(min=0.0).mean()
@@ -498,13 +598,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # depth = torch.where(depth.isnan() | depth.isinf(), torch.zeros_like(depth), depth)
                 # loss += (2 - depth[depth < 2]).sum() * 0.01
                 # print(loss, '4', depth[depth < 3].isinf().any())
-                
+                depth = render_pkg["depth"]
+                # print("min depth", depth.min())
+                # loss += torch.clip(0.5 - depth, min = 0.0).mean()
                 if iteration > 0 and visibility_filter.sum() > 0:
                     scale = gaussians.get_scaling[visibility_filter]
                     sorted_scale, _ = torch.sort(scale, dim=-1)
                     min_scale_loss = sorted_scale[...,0]
                     loss += 100 * min_scale_loss.mean()
-                    loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
+                    #scale_large = gaussians.get_scaling[visibility_filter]
+                    #sorted_scale_large, _ = torch.sort(scale, dim=-1)
+                    # large_scale_loss = torch.abs((sorted_scale[...,1] - sorted_scale[..., 2])).mean()
+                    # if iteration < 30000:
+                    #     loss += 0.1 * large_scale_loss
+                    #loss += 0.01 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
                     #loss += 0.001 * (gaussians.get_velocity / (gaussians.get_sigma_t + 1)).abs().mean()  # encourage velocity to be small
                     #velocity_norm = torch.norm(gaussians.get_velocity.detach(), p=2, dim=1).unsqueeze(1)
                     #velocity_norm2 = torch.norm(gaussians.get_velocity2.detach(), p=2, dim=1).unsqueeze(1)
@@ -525,7 +632,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-20)
                     depth_normal = torch.nn.functional.normalize(depth_normal, dim=0, eps=1e-20)
                     #normal_grad = get_img_grad_weight_avg(normal)
-                    depth_normal_grad = get_img_grad_weight_avg(depth_normal)
+                    #depth_normal_grad = get_img_grad_weight_avg(depth_normal)
                     
                     if n_gt is not None:
                         n_gt = n_gt.cuda()
@@ -547,8 +654,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #     # cv2.imwrite("./test/debug_render1.png", (((de0-de0.min())/(de0.max()-de0.min())).clip(min=0, max=1).squeeze()[..., None][..., [0]*3].detach().cpu().numpy() * 255).astype(np.uint8))
 
-                    image_weight = (1.0 - get_img_grad_weight(gt_image))
-                    image_weight = (image_weight).clamp(0,1).detach() ** 2
+                    # image_weight = (1.0 - get_img_grad_weight(gt_image))
+                    # image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
                         #normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
@@ -569,8 +676,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         #loss += normal_grad_loss
                     if iteration >= 1000:
                         loss += 0.01 * (gaussians.get_delta_normal**2).mean()
-                    if iteration <= opt.densify_until_iter:
-                        loss += 0.01 * gaussians.get_opacity.mean()
+                    # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
+                    if (iteration > opt.densify_from_iter and iteration <= 15000):
+                        #pass
+                        # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+                        # ENV_RADIUS = 8
+                        # outside_mask = get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
+                        # gs_in = torch.ones(xyz.shape[0], device="cuda")
+                        # gs_in[outside_mask] = 0.0
+                        # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
+                        #loss += 0.01 * gaussians.get_opacity[ma].mean()
+                        loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
+                        #loss += 0.001 * gaussians.get_opacity.mean()
+                    density_loss = entropy_loss(opacity[visibility_filter])
+                    #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
+                    if iteration > 3000:
+                        loss += density_loss * 0.01
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
                 loss = loss / batch_size
@@ -649,32 +770,71 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     scene.tgh.clear_tgh()
                     scene.tgh.create_from_gaussians(gaussians)
                     scene.save(iteration, opt, tgh, id)
-
+                # if iteration <= 3000:
+                #     densification_interval = 100
+                # elif iteration < 6000:
+                #     densification_interval = 200
+                # elif iteration < 15000:
+                #     densification_interval = 300
+                # else:
+                #     densification_interval = 500
                 # Densification
-                if iteration < opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                # if iteration <= opt.densify_until_iter2 and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
-                        gaussians.add_densification_stats_pgsr(viewspace_point_tensor, viewspace_point_tensor_abs, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
+                        # if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2) and not (iteration > opt.densify_until_iter and iteration < opt.densify_from_iter2):
+                        if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2):
+                            add_specular_grads = True
+                        else:
+                            add_specular_grads = False
+                            
+                        gaussians.add_densification_stats_pgsr(viewspace_point_tensor, viewspace_point_tensor_abs, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None, add_specular_grads)
                     else:
                         gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
                         
                     #if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and (iteration < 3000 or iteration > 6000):
-                    if iteration > opt.densify_from_iter and ((iteration % opt.densification_interval == 0 and iteration < 2000) or (iteration % (opt.densification_interval * 3) == 0)):
+                    # if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2)) and (iteration % densification_interval == 0):
+                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, opt.densify_grad_t_threshold)
-                    
+                        if iteration >= 8000:
+                            densify_split_time = True
+                        else:
+                            densify_split_time = False
+                        spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and densify_split_time) else None
+                        # if densify_split_time:
+                        #     if iteration < 10000:
+                        #         spec_time_thr = opt.densify_specular_time_threshold
+                        #     else:
+                        #         spec_time_thr = opt.densify_specular_time_threshold / 2
+                        # else:
+                        #     spec_time_thr = None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr)
+                        # spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and add_specular_grads) else None
+                        # gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)   
+                    #if iteration > opt.densify_from_iter and iteration % (opt.densification_interval * 2) == 0:
+                        #spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and add_specular_grads) else None
+                        # gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)              
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    #if iteration % 100 == 0:
-                        pass
-                        # gaussians.reset_opacity()
+                        #pass
+                        # print("reset opacity")
+                        # if iteration == opt.opacity_reset_interval:
+                        #     gaussians.reset_opacity()
+                        if iteration < 15000:
+                            gaussians.reset_opacity_high()
+                        #gaussians.reset_specular_high()
+                        # gaussians.reset_feature()
                         # tgh.reset_opacity()
-
+                    # if iteration % 3000 == 0:
+                    #     gaussians.reset_opacity_large()
                 # if iteration == 500000:
                 #     tgh.reset_diffuse()
                 #     gaussians.reset_diffuse()
-                        
+                # if iteration < 25000 and  iteration > opt.densify_from_iter and (iteration % opt.densification_interval == 0):
+                #     spec_time_thr = opt.densify_specular_time_threshold if opt.densify_specular_time_threshold > 0 and add_specular_grads else None
+                #     gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)
                 # Optimizer step
                 if iteration < opt.iterations:
                     # copy_and_cat_engine.waitGroupCompletion(0, 0)

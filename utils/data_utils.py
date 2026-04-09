@@ -74,7 +74,24 @@ class CameraDataset(Dataset):
                 
         else:
             viewpoint_image = viewpoint_cam.image
-            
+            loaded_mask = None
+            normal = viewpoint_cam.normal
+            depth = viewpoint_cam.depth
+            # normal_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_normal", viewpoint_cam.image_name + ".npy"))
+            # #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+            # if os.path.exists(normal_path):
+            #     normal = np.load(normal_path)
+            # else:
+            #     normal = None
+            # #normal = None
+
+            # depth_path = "/" + os.path.join(os.path.join(*viewpoint_cam.image_path.split("/")[0:-2]), os.path.join("sgt_depth", viewpoint_cam.image_name + ".npy"))
+            # #mask_name = viewpoint_cam.image_name.split("_")[-1].split(".")[0] + ".png"
+            # if os.path.exists(depth_path):
+            #     depth = np.load(depth_path)
+            # else:
+            #     depth = None
+            rr = None
         return viewpoint_image, loaded_mask, viewpoint_cam, rr, normal, depth
     
     def __len__(self):

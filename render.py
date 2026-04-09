@@ -27,15 +27,17 @@ from transformers import pipeline as pp
 import numpy as np
 import cv2
 
-def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background):
-    render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")
-    gts_path = os.path.join(model_path, name, "ours_{}".format(iteration), "gt")
-    predicted_depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "predicted_depth")
-    depth_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "depth_normal")
-    rendered_normal_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_normal")
-    depth_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_depth")
-    feature_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_feature")
-    spec_path = os.path.join(model_path, name, "ours_{}".format(iteration), "rendered_specular")
+def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background, id):
+    render_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "renders")
+    gts_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "gt")
+    predicted_depth_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "predicted_depth")
+    depth_normal_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "depth_normal")
+    rendered_normal_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_normal")
+    depth_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_depth")
+    feature_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_feature")
+    spec_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_specular")
+    alpha_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_alpha")
+    in_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_in")
     # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     # pipe.model.eval()
@@ -48,6 +50,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     makedirs(depth_path, exist_ok=True)
     makedirs(feature_path, exist_ok=True)
     makedirs(spec_path, exist_ok=True)
+    makedirs(alpha_path, exist_ok=True)
+    makedirs(in_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -109,9 +113,29 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
         #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+        #mt = torch.sigmoid((mt - 0.5) * 14)
+        #mt = torch.sigmoid((mt - 0.5) * (12 + gaussians.get_specular[..., 0:1]))
+        # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+        # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+        # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
         opacity = gaussians.get_opacity * mt
+        #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
+        iteration = 50000
         #shs = None
+        # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
+        # if iteration <= 5000:
+        #     pass
+        # elif iteration <= 10000:
+        #     ma = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+        #     ma = ma < (1 - 0.1)
+        # elif iteration <= 30000:
+        #     ma = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+        #     ma = ma < (1 - 0.2)
+        # else:
+        #     ma = torch.rand(gaussians.get_opacity.shape[0], device=gaussians.get_opacity.device).cuda()
+        #     ma = ma < (1 - 0.3)
+        # ma = torch.logical_and(ma, (mt > 0.05).squeeze())
         ma = (mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
         gaussians.brdf_mlp.build_mips()
@@ -122,7 +146,6 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
         dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
         dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-        iteration = 60000
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
                                                     gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, timestamp=timestamp)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
@@ -135,6 +158,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #feature_map = render_package["rendered_feature"].detach()
         feature_map = render_package["feature_map"]
         spec_rgb = render_package["spec_rgb"]
+        render_alpha = render_package["alpha"]
+        render_in = render_package["rendered_in"]
         psnr_avg += psnr(rendering.clamp(0.0, 1.0), gt.cuda())
         # h, w = feature_map.shape[1:]
         # flat_feature = feature_map.permute(1, 2, 0).reshape(-1, 4)
@@ -166,7 +191,9 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #np.save(os.path.join(predicted_depth_path, '{0:05d}'.format(idx) + ".npy"), predicted_depth)
         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
-        torchvision.utils.save_image(feature_map[0:3], os.path.join(feature_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image((feature_map[0:3] + 1) / 2, os.path.join(feature_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image((render_alpha - 0.9) * 10, os.path.join(alpha_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(render_in, os.path.join(in_path, '{0:05d}'.format(idx) + ".png"))
         if spec_rgb is not None:
             torchvision.utils.save_image(spec_rgb, os.path.join(spec_path, 'spec_rgb_{0:05d}'.format(idx) + ".png"))
     psnr_avg /= len(views)
@@ -191,10 +218,10 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, tgh, pipeline, background)
+             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, tgh, pipeline, background, id)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, tgh, pipeline, background)
+             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, tgh, pipeline, background, id)
 
 if __name__ == "__main__":
     # Set up command line argument parser

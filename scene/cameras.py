@@ -20,7 +20,7 @@ class Camera:
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", timestamp = 0.0, W=0, H=0,
-                 cx=-1, cy=-1, fl_x=-1, fl_y=-1, depth=None, resolution=None, image_path=None, meta_only=False,
+                 cx=-1, cy=-1, fl_x=-1, fl_y=-1, depth=None, normal=None, resolution=None, image_path=None, meta_only=False,
                  ):
 
         self.uid = uid
@@ -41,6 +41,8 @@ class Camera:
         self.image = image
         self.gt_alpha_mask = gt_alpha_mask
         self.meta_only = meta_only
+        self.depth = depth
+        self.normal = normal
         
         self.intr = torch.tensor([[fl_x, 0, cx],
                                [0, fl_y, cy],

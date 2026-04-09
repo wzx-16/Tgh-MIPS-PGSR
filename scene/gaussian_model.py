@@ -12,7 +12,7 @@
 import math
 import torch
 import numpy as np
-from utils.general_utils import inverse_sigmoid, get_expon_lr_func, build_rotation, build_rotation_4d, build_scaling_rotation_4d
+from utils.general_utils import inverse_sigmoid, inverse_tanh, get_expon_lr_func, build_rotation, build_rotation_4d, build_scaling_rotation_4d, inverse_sigmoid_opa
 from torch import nn
 import os
 from utils.system_utils import mkdir_p
@@ -131,6 +131,7 @@ class GaussianModel:
         self.max_radii2D = torch.empty(0, device=device)
         self.xyz_gradient_accum = torch.empty(0, device=device)
         self.xyz_gradient_accum_abs = torch.empty(0, device=device)
+        self.specular_time_gradient_accum = torch.empty(0, device=device)
         self.denom = torch.empty(0, device=device)
         self.optimizer = None
         self.percent_dense = 0
@@ -161,6 +162,7 @@ class GaussianModel:
         #self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
         self.brdf_mlp = None
         #self.brdf_mlp_2 = create_trainable_env_rnd(128, scale=0.0, bias=0.8)
+        #self._albedo = torch.empty(0, device=device)
         self._specular = torch.empty(0, device=device)
         self._specular2 = torch.empty(0, device=device)
         self._roughness = torch.empty(0, device=device)
@@ -183,6 +185,7 @@ class GaussianModel:
 
         self.dir_encoding = None
         self.light_mlp = None
+        self.light_mlp_2 = None
 
     def init_light_env(self):
         n_levels = 9  
@@ -196,8 +199,72 @@ class GaussianModel:
             nn.ReLU(inplace=True),
             nn.Linear(run_dim, 3),
         ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * self.gsdim * 10 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * self.gsdim + self.sph_dim + 10, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 44 + self.sph_dim, run_dim * 2),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim * 2, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 44 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 48 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 114 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * self.gsdim + self.sph_dim + 3, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
+        # self.light_mlp = nn.Sequential(
+        #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, run_dim),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(run_dim, 3),
+        # ).cuda()
         nn.init.constant_(self.light_mlp[-1].bias, np.log(0.25))
-        self.brdf_mlp = create_trainable_env_rnd(256, scale=0.0, bias=0.8)
+        self.light_mlp_2 = nn.Sequential(
+            nn.Linear(self.gsdim + 10, run_dim // 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim // 4, run_dim // 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(run_dim // 4, 4),
+        ).cuda()
+        nn.init.constant_(self.light_mlp_2[-1].bias, 0.0)
+        self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
 
     def capture(self):
         if self.gaussian_dim == 3:
@@ -562,6 +629,8 @@ class GaussianModel:
         self._rot_velocity = torch.empty(0, 4, device=self.device)
         self._specular = torch.empty(0, 3, device=self.device)
         self._specular2 = torch.empty(0, 44, device=self.device)
+        #self._specular2 = torch.empty(0, 20, device=self.device)
+        #self._specular2 = torch.empty(0, 4, device=self.device)
         self._delta_normal = torch.empty(0, 3, device=self.device)
         self._roughness = torch.empty(0, 1, device=self.device)
 
@@ -838,6 +907,7 @@ class GaussianModel:
             self.max_radii2D = torch.cat([self.max_radii2D, gaussians.max_radii2D[mask].to(self.device)])
             self.xyz_gradient_accum = torch.cat([self.xyz_gradient_accum, gaussians.xyz_gradient_accum[mask].to(self.device)])
             self.xyz_gradient_accum_abs = torch.cat([self.xyz_gradient_accum_abs, gaussians.xyz_gradient_accum_abs[mask].to(self.device)])
+            self.specular_time_gradient_accum = torch.cat([self.specular_time_gradient_accum, gaussians.specular_time_gradient_accum[mask].to(self.device)])
             self.t_gradient_accum = torch.cat([self.t_gradient_accum, gaussians.t_gradient_accum[mask].to(self.device)])
             self.denom = torch.cat([self.denom, gaussians.denom[mask].to(self.device)])
             #self.spatial_lr_scale = torch.cat([self.spatial_lr_scale, gaussians.spatial_lr_scale[mask]]).to(self.device)
@@ -858,6 +928,8 @@ class GaussianModel:
                 if group["name"] == "brdf_mlp":
                     continue
                 if group["name"] == "light_mlp":
+                    continue
+                if group["name"] == "light_mlp2":
                     continue
                 if group["name"] == "dir_encoding":
                     continue
@@ -934,6 +1006,7 @@ class GaussianModel:
         self.xyz_gradient_accum = torch.cat([self.xyz_gradient_accum, gaussians.xyz_gradient_accum.cuda()])
         self.xyz_gradient_accum_abs = torch.cat([self.xyz_gradient_accum_abs, gaussians.xyz_gradient_accum_abs.cuda()])
         self.t_gradient_accum = torch.cat([self.t_gradient_accum, gaussians.t_gradient_accum.cuda()])
+        self.specular_time_gradient_accum = torch.cat([self.specular_time_gradient_accum, gaussians.specular_time_gradient_accum.cuda()])
         self.denom = torch.cat([self.denom, gaussians.denom.cuda()])
         #self.spatial_lr_scale = torch.cat([self.spatial_lr_scale, gaussians.spatial_lr_scale]).cuda()
         self._t = nn.Parameter(torch.cat([self._t, gaussians._t.cuda()]))
@@ -1032,7 +1105,7 @@ class GaussianModel:
         
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling)
+        return self.scaling_activation(self._scaling) + 0.001
     
     @property
     def get_scaling_t(self):
@@ -1068,7 +1141,10 @@ class GaussianModel:
     
     @property
     def get_specular(self):
-        return self.specular_activation(self._specular)
+        # return self.specular_activation(self._specular)
+        return torch.exp(torch.clamp(self._specular, max=3.0))
+        # bias = torch.tensor(5.0, dtype=torch.float32).to("cuda")
+        # return torch.exp(torch.clamp(self._specular, max=5.0))
 
     @property
     def get_specular2(self):
@@ -1099,6 +1175,28 @@ class GaussianModel:
         features_dc = self._features_dc
         features_rest = self._features_rest
         return torch.cat((features_dc, features_rest), dim=1)
+
+    @property
+    def get_specular2_temporal_variation(self):
+        if not (self.gaussian_dim == 4 and self.rot_4d and self._specular2.numel() > 0):
+            return torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
+
+        if self._specular2.grad is None:
+            return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
+
+        # feature_coeff_grad = self._specular2.grad[:, self.gsdim:]
+        # if feature_coeff_grad.shape[1] == 0:
+        #     return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
+        feature_grad = self._specular2.grad
+
+        # n_freq = feature_coeff_grad.shape[1] // self.gsdim
+        # if n_freq == 0:
+        #     return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
+
+        # feature_coeff_grad = feature_coeff_grad[:, : self.gsdim * n_freq].reshape(-1, self.gsdim, n_freq)
+        # variation = feature_coeff_grad.abs().mean(dim=(1, 2), keepdim=False).unsqueeze(-1)
+        variation = feature_grad.abs().mean(dim=1, keepdim=True)
+        return variation
     
     @property
     def get_opacity(self):
@@ -1124,6 +1222,13 @@ class GaussianModel:
     
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
+
+    def reset_opacity_large(self):
+        opacities_new = self.get_opacity.detach()
+        mask = opacities_new > 0.95
+        if mask.any():
+            new_val = self.inverse_opacity_activation(torch.tensor(0.8, device=self.device))
+            self._opacity.data[mask] = new_val
 
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
@@ -1161,6 +1266,8 @@ class GaussianModel:
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device="cuda")
+                #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device="cuda")
+                #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device="cuda")
 
@@ -1258,6 +1365,8 @@ class GaussianModel:
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
+                #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
+                #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1298,7 +1407,8 @@ class GaussianModel:
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
-                if ii < 80 and ii >= 70:
+                if ii < 81 and ii >= 49:
+                #if ii == 71:
                 #if ii < 10:
             
                     # if ii % 30 != 0:
@@ -1313,8 +1423,8 @@ class GaussianModel:
                     #break
                     ply_path = os.path.join(pcd_parent_path, pcd_path)
                     pcd = fetchPly(ply_path)
-                    if pcd.points.shape[0] > 150000:
-                        mask = np.random.randint(0, pcd.points.shape[0], 150000)
+                    if pcd.points.shape[0] > 50000:
+                        mask = np.random.randint(0, pcd.points.shape[0], 50000)
                         xyz = pcd.points[mask]
                         rgb = pcd.colors[mask]
                         normals = pcd.normals[mask]
@@ -1346,7 +1456,7 @@ class GaussianModel:
                         # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 1000
                         dist_t = (torch.zeros_like(fused_times, device=self.device) + seg / 2) / 1
                         #scales_t = torch.log(torch.sqrt(dist_t))
-                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
+                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.5)) * dist_t)
                         if self.rot_4d:
                             velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
                             velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
@@ -1354,6 +1464,8 @@ class GaussianModel:
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
+                            #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
+                            #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
 
@@ -1416,8 +1528,8 @@ class GaussianModel:
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
-        if pcd.points.shape[0] > 1000000:
-            mask = np.random.randint(0, pcd.points.shape[0], 1000000)
+        if pcd.points.shape[0] > 500000:
+            mask = np.random.randint(0, pcd.points.shape[0], 500000)
             xyz = pcd.points[mask]
             rgb = pcd.colors[mask]
             normals = pcd.normals[mask]
@@ -1432,7 +1544,11 @@ class GaussianModel:
             
         for ii in range(1):
             # timestamp = -10 / 2 / 2 + 5 * (2 * ii + 1)
-            timestamp = (self.time_duration[1] - self.time_duration[0]) / 2
+            #timestamp = (self.time_duration[1] - self.time_duration[0]) / 2
+            #timestamp = (2.3333333333333335 + 2.6333333333333333) / 2
+            #timestamp = (2.3333333333333335 + 2.4) / 2
+            #timestamp = 2.4
+            timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
             # if time_duration is not None:
             #     if timestamp < time_duration[0] - 10 / 2 / 2 or timestamp > time_duration[1] + 10 / 2 / 2:
@@ -1449,9 +1565,13 @@ class GaussianModel:
             if self.gaussian_dim == 4:
                 # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
-                dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
+                #dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
+                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 1.6666666666666667) / 2
+                #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 2.3333333333333335) / 2
+                #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
+                # dist_t = torch.zeros_like(fused_times, device=self.device)
                 # scales_t = torch.log(torch.sqrt(dist_t))
-                scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
+                scales_t = torch.log(math.sqrt(-0.5 / math.log(0.7)) * dist_t)
                 if self.rot_4d:
                     velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
@@ -1459,6 +1579,8 @@ class GaussianModel:
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
+                    #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
+                    #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     delta_normal = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     roughness = self.default_roughness * torch.ones((fused_point_cloud.shape[0], 1), device=self.device)
                     
@@ -1579,6 +1701,7 @@ class GaussianModel:
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.specular_time_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
@@ -1601,11 +1724,12 @@ class GaussianModel:
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.specular_lr, "name": "specular"})
-                l.append({'params': [self._specular2], 'lr': training_args.feature_lr, "name": "specular2"})
+                l.append({'params': [self._specular2], 'lr': training_args.feature_lr * 5, "name": "specular2"})
                 l.append({'params': [self._delta_normal], 'lr': training_args.delta_normal_lr, "name": "delta_normal"})
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
                 l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
-                l.append({'params': list(self.light_mlp.parameters()), 'lr': training_args.mlp_lr_init, "name": "light_mlp"})
+                l.append({'params': list(self.light_mlp.parameters()), 'lr': training_args.mlp_lr_init * 2, "name": "light_mlp"})
+                l.append({'params': list(self.light_mlp_2.parameters()), 'lr': training_args.mlp_lr_init, "name": "light_mlp2"})
                 l.append({'params': list(self.dir_encoding.parameters()), 'lr': training_args.encoding_lr_init, "name": "dir_encoding"})
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -1615,7 +1739,7 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr,
-                                                    lr_final=training_args.rotation_lr / 4,
+                                                    lr_final=training_args.rotation_lr / 2,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         self.velocity2_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 50,
@@ -1626,14 +1750,30 @@ class GaussianModel:
                                         lr_final=training_args.brdf_mlp_lr_final,
                                         lr_delay_mult=training_args.brdf_mlp_lr_delay_mult,
                                         max_steps=training_args.brdf_mlp_lr_max_steps)
-        self.light_mlp_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_lr_init,
-                                        lr_final=training_args.mlp_lr_final,
+        self.light_mlp_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_lr_init * 2,
+                                        lr_final=training_args.mlp_lr_init,
                                         lr_delay_mult=training_args.mlp_lr_delay_mult,
                                         max_steps=training_args.mlp_lr_max_steps)
         self.encoding_scheduler_args = get_expon_lr_func(lr_init=training_args.encoding_lr_init,
                                         lr_final=training_args.encoding_lr_final,
                                         lr_delay_mult=training_args.encoding_lr_delay_mult,
                                         max_steps=training_args.encoding_lr_max_steps)
+        self.t_scheduler_args = get_expon_lr_func(lr_init=training_args.position_t_lr_init * self.spatial_lr_scale,
+                                                    lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 2,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+
+        self.scaling_t_scheduler_args = get_expon_lr_func(lr_init=training_args.scaling_lr,
+                                                    lr_final=training_args.scaling_lr / 2,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+
+        self.specular_feature_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr * 5,
+                                                    lr_final=training_args.feature_lr / 2,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+        
+
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -1649,6 +1789,22 @@ class GaussianModel:
             if param_group["name"] == "brdf_mlp":
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
+                #return lr
+            if param_group["name"] == "t":
+                lr = self.t_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "scaling_t":
+                lr = self.scaling_t_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "specular2":
+                lr = self.specular_feature_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "light_mlp":
+                lr = self.light_mlp_scheduler_args(iteration)
+                param_group["lr"] = lr
                 #return lr
             # if param_group["name"] == "velocity2":
             #     lr = self.velocity2_scheduler_args(iteration)
@@ -1667,6 +1823,31 @@ class GaussianModel:
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
+
+    def reset_opacity_high(self):
+        opacities = self.get_opacity
+        mask = opacities > 0.995
+        opacities_new = opacities.clone()
+        opacities_new[mask] = 0.99
+        opacities_new = inverse_sigmoid(opacities_new)
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+
+    def reset_specular_high(self):
+        specular2 = self.get_specular2
+        mask_high = specular2 > 0.995
+        mask_low = specular2 < -0.995
+        specular2_new = specular2.clone()
+        specular2_new[mask_high] = 0.99
+        specular2_new[mask_low] = -0.99
+        specular2_new = inverse_tanh(specular2_new)
+        optimizable_tensors = self.replace_tensor_to_optimizer(specular2_new, "specular2")
+        self._specular2 = optimizable_tensors["specular2"]
+
+    def reset_feature(self):
+        feature_new = torch.zeros_like(self._specular2)
+        optimizable_tensors = self.replace_tensor_to_optimizer(feature_new, "specular2")
+        self._specular2 = optimizable_tensors["specular2"]
 
     def reset_diffuse(self):
         mask = self.get_specular.mean(dim=-1) < 0.8
@@ -1711,6 +1892,8 @@ class GaussianModel:
                 continue
             if group["name"] == "light_mlp":
                 continue
+            if group["name"] == "light_mlp2":
+                continue
             if group["name"] == "dir_encoding":
                 continue
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -1741,6 +1924,7 @@ class GaussianModel:
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.xyz_gradient_accum_abs = self.xyz_gradient_accum_abs[valid_points_mask]
+        self.specular_time_gradient_accum = self.specular_time_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
@@ -1765,6 +1949,8 @@ class GaussianModel:
             if group["name"] == "brdf_mlp":
                 continue
             if group["name"] == "light_mlp":
+                continue
+            if group["name"] == "light_mlp2":
                 continue
             if group["name"] == "dir_encoding":
                 continue
@@ -1831,17 +2017,269 @@ class GaussianModel:
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.xyz_gradient_accum_abs = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.specular_time_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, N=2):
+    def get_outside_msk(self, xyz, ENV_CENTER, ENV_RADIUS):
+        if ENV_CENTER is None or ENV_RADIUS is None:
+            #print("mask", (torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)).size())
+            return torch.zeros(xyz.shape[0], device="cuda", dtype=torch.bool)
+        #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
+        return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
+
+    def densify_and_split_time(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=2):
+        if grad_spec_t_threshold is None:
+            return
+        n_init_points = self.get_xyz.shape[0]
+        # Extract points that satisfy the gradient condition
+        # padded_grad = torch.zeros((n_init_points), device="cuda")
+        # padded_grad[:grads.shape[0]] = grads.squeeze()
+        # selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+
+        # spatial_spread_mask = torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
+        # # if self.gaussian_dim == 4:
+        # #     time_span = max(self.time_duration[1] - self.time_duration[0], 1.0e-6)
+        # #     temporal_spread_mask = self.get_scaling_t.squeeze(-1) > self.percent_dense * time_span
+        # #     spread_mask = torch.logical_or(spatial_spread_mask, temporal_spread_mask)
+        # # else:
+        # spread_mask = spatial_spread_mask
+        selected_pts_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
+        if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
+            padded_grad_t = torch.zeros((n_init_points), device="cuda")
+            padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
+            selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
+
+        if self.gaussian_dim == 4 and grads_spec_t is not None and grad_spec_t_threshold is not None:
+            padded_grad_spec_t = torch.zeros((n_init_points), device="cuda")
+            padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
+            selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
+            print("max grads_spec_t: ", padded_grad_spec_t.max())
+            min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+            ENV_RADIUS = 8
+            xyz = self.get_xyz
+            outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
+            gs_in = torch.ones(xyz.shape[0], device="cuda")
+            gs_in[outside_mask] = 0.0
+            #min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            print("mask size", selected_pts_mask.sum(), min_scale_t_mask.sum(), gs_in.sum())
+            selected_pts_mask = torch.logical_and(selected_pts_mask, min_scale_t_mask)
+            selected_pts_mask = torch.logical_and(selected_pts_mask, gs_in.bool())
+        # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
+        print("densify_and_split_time: ", selected_pts_mask.sum())
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        
+        # if not self.rot_4d:
+        #     stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        #     means = torch.zeros((stds.size(0), 3),device=self.device)
+        #     samples = torch.normal(mean=means, std=stds)
+        #     rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        #     new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        #     new_t = None
+        #     new_scaling_t = None
+        #     new_velocity = None
+        #     new_velocity2 = None
+        #     new_velocity3 = None
+        #     new_rot_velocity = None
+        #     new_specular = None
+        #     new_specular2 = None
+        #     new_delta_normal = None
+        #     new_roughness = None
+        #     if self.gaussian_dim == 4:
+        #         stds_t = self.get_scaling_t[selected_pts_mask].repeat(N,1)
+        #         means_t = torch.zeros((stds_t.size(0), 1),device=self.device)
+        #         samples_t = torch.normal(mean=means_t, std=stds_t)
+        #         new_t = samples_t + self.get_t[selected_pts_mask].repeat(N, 1)
+        #         new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1) / (0.8*N))
+        # else:
+        stds = self.get_scaling_xyzt[selected_pts_mask].repeat(N,1)
+        stds = stds[:,0:3]
+        means = torch.zeros((stds.size(0), 3),device=self.device)
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        xyzt = self.get_xyzt[selected_pts_mask]# + torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+        #new_xyz = new_xyzt[...,0:3]
+        #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_t = xyzt[...,3:4]
+        #new_scaling_t = torch.zeros_like(self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))) + torch.log(torch.tensor(0.4 * 20))
+        new_scaling_t = self.get_scaling_t[selected_pts_mask]
+        if new_scaling_t.numel() > 0:
+            print("max scaling_t before split: ", new_scaling_t.max())
+        new_t_before = new_t - 0.588 * new_scaling_t
+        new_t_after = new_t + 0.588 * new_scaling_t
+        # new_t_before = new_t - 0.5 * new_scaling_t
+        # new_t_after = new_t + 0.5 * new_scaling_t
+        new_t = torch.cat((new_t_before, new_t_after), dim=0)
+        new_xyz_before = self.get_xyz[selected_pts_mask] - 0.588 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        new_xyz_after = self.get_xyz[selected_pts_mask] + 0.588 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        # new_xyz_before = self.get_xyz[selected_pts_mask] - 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        # new_xyz_after = self.get_xyz[selected_pts_mask] + 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        new_xyz = torch.cat((new_xyz_before, new_xyz_after), dim=0)
+        new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask] * 0.501).repeat(N,1)
+        #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
+        new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+        new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
+        new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
+        new_specular = self._specular[selected_pts_mask].repeat(N,1)
+        
+        noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
+        new_specular2_before = self._specular2[selected_pts_mask] + noise_spec2
+        new_specular2_after = self._specular2[selected_pts_mask] - noise_spec2
+        new_specular2 = torch.cat((new_specular2_before, new_specular2_after), dim=0)
+        
+        new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
+        new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
+        #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
+        new_velocity = (self._velocity[selected_pts_mask] * ((self.get_scaling_t[selected_pts_mask] * 0.501)**2 + 1)/ (self.get_sigma_t[selected_pts_mask] + 1)).repeat(N,1)
+        # new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
+        # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
+        #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness)
+
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+
+    def densify_and_split_time3(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=3):
+        if grad_spec_t_threshold is None:
+            return
+        n_init_points = self.get_xyz.shape[0]
+        # Extract points that satisfy the gradient condition
+        # padded_grad = torch.zeros((n_init_points), device="cuda")
+        # padded_grad[:grads.shape[0]] = grads.squeeze()
+        # selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+
+        # spatial_spread_mask = torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
+        # # if self.gaussian_dim == 4:
+        # #     time_span = max(self.time_duration[1] - self.time_duration[0], 1.0e-6)
+        # #     temporal_spread_mask = self.get_scaling_t.squeeze(-1) > self.percent_dense * time_span
+        # #     spread_mask = torch.logical_or(spatial_spread_mask, temporal_spread_mask)
+        # # else:
+        # spread_mask = spatial_spread_mask
+        selected_pts_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
+        if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
+            padded_grad_t = torch.zeros((n_init_points), device="cuda")
+            padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
+            selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
+
+        if self.gaussian_dim == 4 and grads_spec_t is not None and grad_spec_t_threshold is not None:
+            padded_grad_spec_t = torch.zeros((n_init_points), device="cuda")
+            padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
+            selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
+            print("max grads_spec_t: ", padded_grad_spec_t.max())
+            # min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            print("mask size", selected_pts_mask.sum(), min_scale_t_mask.sum())
+            selected_pts_mask = torch.logical_and(selected_pts_mask, min_scale_t_mask)
+        # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
+        print("densify_and_split_time: ", selected_pts_mask.sum())
+        new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1))
+        new_rotation = self._rotation[selected_pts_mask].repeat(N,1)
+        new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
+        new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
+        new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        
+        # if not self.rot_4d:
+        #     stds = self.get_scaling[selected_pts_mask].repeat(N,1)
+        #     means = torch.zeros((stds.size(0), 3),device=self.device)
+        #     samples = torch.normal(mean=means, std=stds)
+        #     rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        #     new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        #     new_t = None
+        #     new_scaling_t = None
+        #     new_velocity = None
+        #     new_velocity2 = None
+        #     new_velocity3 = None
+        #     new_rot_velocity = None
+        #     new_specular = None
+        #     new_specular2 = None
+        #     new_delta_normal = None
+        #     new_roughness = None
+        #     if self.gaussian_dim == 4:
+        #         stds_t = self.get_scaling_t[selected_pts_mask].repeat(N,1)
+        #         means_t = torch.zeros((stds_t.size(0), 1),device=self.device)
+        #         samples_t = torch.normal(mean=means_t, std=stds_t)
+        #         new_t = samples_t + self.get_t[selected_pts_mask].repeat(N, 1)
+        #         new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1) / (0.8*N))
+        # else:
+        stds = self.get_scaling_xyzt[selected_pts_mask].repeat(N,1)
+        stds = stds[:,0:3]
+        means = torch.zeros((stds.size(0), 3),device=self.device)
+        samples = torch.normal(mean=means, std=stds)
+        rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
+        xyzt = self.get_xyzt[selected_pts_mask]# + torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
+        #new_xyz = new_xyzt[...,0:3]
+        #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
+        new_t = xyzt[...,3:4]
+        #new_scaling_t = torch.zeros_like(self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))) + torch.log(torch.tensor(0.4 * 20))
+        new_scaling_t = self.get_scaling_t[selected_pts_mask]
+        new_t_before = new_t - 0.5 * new_scaling_t
+        new_t_middle = new_t
+        new_t_after = new_t + 0.5 * new_scaling_t
+        new_t = torch.cat((new_t_before, new_t_middle, new_t_after), dim=0)
+        new_xyz_before = self.get_xyz[selected_pts_mask] - 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        new_xyz_middle = self.get_xyz[selected_pts_mask]
+        new_xyz_after = self.get_xyz[selected_pts_mask] + 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
+        new_xyz = torch.cat((new_xyz_before, new_xyz_middle, new_xyz_after), dim=0)
+        new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask] / 2).repeat(N,1)
+        #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
+        new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+        new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
+        new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
+        new_specular = self._specular[selected_pts_mask].repeat(N,1)
+        new_specular2 = self._specular2[selected_pts_mask].repeat(N,1)
+        new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
+        new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
+        #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
+        new_velocity = (self._velocity[selected_pts_mask] * ((self.get_scaling_t[selected_pts_mask] / 2)**2 + 1)/ (self.get_sigma_t[selected_pts_mask] + 1)).repeat(N,1)
+        # new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
+        # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
+        #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness)
+
+        prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        self.prune_points(prune_filter)
+
+    def densify_and_split(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask, N=2):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
         padded_grad[:grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_and(selected_pts_mask,
-                                              torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        
+        padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+        padded_inside_mask[:inside_mask.shape[0]] = inside_mask
+        
+        padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+        padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+
+        #selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(padded_grad >= grad_threshold, True, False), padded_inside_mask), torch.logical_and(torch.where(padded_grad >= 0.0004, True, False), padded_outside_mask))
+
+        spatial_spread_mask = torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
+        # if self.gaussian_dim == 4:
+        #     time_span = max(self.time_duration[1] - self.time_duration[0], 1.0e-6)
+        #     temporal_spread_mask = self.get_scaling_t.squeeze(-1) > self.percent_dense * time_span
+        #     spread_mask = torch.logical_or(spatial_spread_mask, temporal_spread_mask)
+        # else:
+        spread_mask = spatial_spread_mask
+
+        # if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
+        #     padded_grad_t = torch.zeros((n_init_points), device="cuda")
+        #     padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
+        #     selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
+
+        # if self.gaussian_dim == 4 and grads_spec_t is not None and grad_spec_t_threshold is not None:
+        #     padded_grad_spec_t = torch.zeros((n_init_points), device="cuda")
+        #     padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
+        #     selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
+
+        selected_pts_mask = torch.logical_and(selected_pts_mask, spread_mask)
         # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
         
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1) / (0.8*N))
@@ -1889,6 +2327,8 @@ class GaussianModel:
             new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
             new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
             new_specular = self._specular[selected_pts_mask].repeat(N,1)
+            # noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
+            # new_specular2 = torch.cat((self._specular2[selected_pts_mask] + noise_spec2, self._specular2[selected_pts_mask] - noise_spec2), dim=0)
             new_specular2 = self._specular2[selected_pts_mask].repeat(N,1)
             new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
             new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
@@ -1903,9 +2343,10 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask):
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        #selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), inside_mask), torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= 0.0002, True, False), outside_mask))
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         # print(f"num_to_densify_pos: {torch.where(grads >= grad_threshold, True, False).sum()}, num_to_clone_pos: {selected_pts_mask.sum()}")
@@ -1936,6 +2377,8 @@ class GaussianModel:
                 new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask])
                 new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask])
                 new_specular = self._specular[selected_pts_mask]
+                # noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
+                # new_specular2 = self._specular2[selected_pts_mask] + noise_spec2
                 new_specular2 = self._specular2[selected_pts_mask]
                 new_delta_normal = self._delta_normal[selected_pts_mask]
                 new_roughness = self._roughness[selected_pts_mask]
@@ -1946,7 +2389,21 @@ class GaussianModel:
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_specular2, new_delta_normal, new_roughness)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, max_grad_t=None, prune_only=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False):
+        ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+        ENV_RADIUS = 8
+        xyz = self.get_xyz
+        outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
+        gs_in = torch.ones(xyz.shape[0], device="cuda", dtype=torch.bool)
+        gs_in[outside_mask] = False
+        
+        # n_init_points = self.get_xyz.shape[0]
+        # padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+        # padded_inside_mask[:gs_in.shape[0]] = gs_in
+        
+        # padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+        # padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+
         if not prune_only:
             grads = self.xyz_gradient_accum / self.denom
             grads[grads.isnan()] = 0.0
@@ -1955,11 +2412,66 @@ class GaussianModel:
             if self.gaussian_dim == 4:
                 grads_t = self.t_gradient_accum / self.denom
                 grads_t[grads_t.isnan()] = 0.0
+                grads_spec_t = None
+                if max_specular_time_grad is not None and max_grad_t is not None and max_specular_time_grad > 0:
+                    grads_spec_t = self.specular_time_gradient_accum
+                    grads_spec_t[grads_spec_t.isnan()] = 0.0
+                # grads_spec_t = None
+                # if max_specular_time_grad is not None and max_grad_t is not None and max_specular_time_grad > 0:
+                #     grads_spec_t = self.specular_time_gradient_accum / self.denom
+                #     grads_spec_t[grads_spec_t.isnan()] = 0.0
+                    # grads_t_norm = grads_t / (max_grad_t + 1.0e-12)
+                    # grads_spec_t_norm = grads_spec_t / (max_specular_time_grad + 1.0e-12)
+                    # grads_t = torch.maximum(grads_t_norm, grads_spec_t_norm)
+                    # max_grad_t = 1.0
+            else:
+                grads_t = None
+            if iteration < 15000:
+                self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask)
+                self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask)
+            #self.densify_and_split_time3(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
+            self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
+
+        #prune_mask = (self.get_opacity < min_opacity).squeeze()
+        if iteration < 15000:
+            n_init_points = self.get_xyz.shape[0]
+            padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            padded_inside_mask[:gs_in.shape[0]] = gs_in
+            
+            padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+            prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            self.prune_points(prune_mask)
+
+        torch.cuda.empty_cache()
+
+    def densify_and_prune_time(self, min_opacity, extent, max_screen_size, max_grad_t=None, max_specular_time_grad=None, prune_only=False):
+        if not prune_only:
+            # grads = self.xyz_gradient_accum / self.denom
+            # grads[grads.isnan()] = 0.0
+            # grads_abs = self.xyz_gradient_accum_abs / self.denom
+            # grads_abs[grads_abs.isnan()] = 0.0
+            if self.gaussian_dim == 4:
+                grads_t = self.t_gradient_accum / self.denom
+                grads_t[grads_t.isnan()] = 0.0
+                grads_spec_t = None
+                if max_specular_time_grad is not None and max_grad_t is not None and max_specular_time_grad > 0:
+                    grads_spec_t = self.specular_time_gradient_accum
+                    grads_spec_t[grads_spec_t.isnan()] = 0.0
+                    # grads_t_norm = grads_t / (max_grad_t + 1.0e-12)
+                    # grads_spec_t_norm = grads_spec_t / (max_specular_time_grad + 1.0e-12)
+                    # grads_t = torch.maximum(grads_t_norm, grads_spec_t_norm)
+                    # max_grad_t = 1.0
             else:
                 grads_t = None
 
-            self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t)
-            self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t)
+            # self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t)
+            # self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
+            self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -1976,19 +2488,25 @@ class GaussianModel:
         self.denom[update_filter] += 1
         if self.gaussian_dim == 4:
             self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+            if self.rot_4d and self._specular2.numel() > 0:
+                self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
         
-    def add_densification_stats_pgsr(self, viewspace_point_tensor, viewspace_point_tensor_abs, update_filter, avg_t_grad=None):
+    def add_densification_stats_pgsr(self, viewspace_point_tensor, viewspace_point_tensor_abs, update_filter, avg_t_grad=None, add_specular_time_grad=False):
         self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor_abs.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
         if self.gaussian_dim == 4:
             self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+            if add_specular_time_grad and self.rot_4d and self._specular2.numel() > 0:
+                self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
         
     def add_densification_stats_grad(self, viewspace_point_grad, update_filter, avg_t_grad=None):
         self.xyz_gradient_accum[update_filter] += viewspace_point_grad[update_filter]
         self.denom[update_filter] += 1
         if self.gaussian_dim == 4:
             self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+            if self.rot_4d and self._specular2.numel() > 0:
+                self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
 
     def set_current_timestamp(self, current_timestamp : float):
         self.current_timestamp = current_timestamp

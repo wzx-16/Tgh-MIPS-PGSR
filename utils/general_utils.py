@@ -19,6 +19,12 @@ import random
 def inverse_sigmoid(x):
     return torch.log(x/(1-x))
 
+def inverse_tanh(x):
+    return 0.5 * torch.log((1+x)/(1-x))
+
+def inverse_sigmoid_opa(x):
+    return torch.log(x/(1-x)) / 14 + 0.5
+
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)
     resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0

@@ -75,12 +75,27 @@ def loadCam(args, id, cam_info, resolution_scale):
     else:
         depth = None
 
+    normal_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_normal", cam_info.image_name + ".npy"))
+    # print(normal_path)
+    if os.path.exists(normal_path):
+        normal = np.load(normal_path)
+    else:
+        normal = None
+        #print(normal_path)
+    #normal = None
+
+    depth_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_depth", cam_info.image_name + ".npy"))
+    if os.path.exists(depth_path):
+        depth = np.load(depth_path)
+    else:
+        depth = None
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
                   timestamp=cam_info.timestamp, W=resolution[0], H=resolution[1],
-                  cx=cx, cy=cy, fl_x=fl_x, fl_y=fl_y, depth=depth, resolution=resolution, image_path=cam_info.image_path,
+                  cx=cx, cy=cy, fl_x=fl_x, fl_y=fl_y, depth=depth, normal=normal, resolution=resolution, image_path=cam_info.image_path,
                   meta_only=args.dataloader
                   )
 

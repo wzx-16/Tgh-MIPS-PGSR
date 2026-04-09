@@ -94,16 +94,16 @@ if __name__ == '__main__':
         # W = W // 2
         # H = H // 2
         new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
-        new_camera_matrix[0, 2] -= 100
-        new_camera_matrix[1, 2] -= 100
-        W, H = W - 200, H - 200
+        new_camera_matrix[0, 2] -= 90
+        new_camera_matrix[1, 2] -= 90
+        W, H = W - 180, H - 180
 
-        new_camera_matrix[0][0] /= 2
-        new_camera_matrix[1][1] /= 2
-        new_camera_matrix[0][2] /= 2
-        new_camera_matrix[1][2] /= 2
-        W = W // 2
-        H = H // 2
+        new_camera_matrix[0][0] /= 3
+        new_camera_matrix[1][1] /= 3
+        new_camera_matrix[0][2] /= 3
+        new_camera_matrix[1][2] /= 3
+        W = W // 3
+        H = H // 3
         # mapx, mapy = cv2.initUndistortRectifyMap(K, D, None, new_camera_matrix, (W, H), cv2.CV_32FC1)
 
         # new_camera_matrix[0, 0] /= 2
