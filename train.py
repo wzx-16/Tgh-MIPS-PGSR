@@ -279,9 +279,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-                # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-                # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-                # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+                scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+                min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+                mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
                 #mt = torch.sigmoid((mt - 0.5) * 14)
                 # print("mt size and specular size", mt.shape, gaussians.get_specular[..., 0:1].shape)
                 # print("specular max", gaussians.get_specular[..., 0:1].max())
@@ -567,16 +567,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # min_opa_inversigmoid = torch.log(torch.tensor(0.05, device="cuda") / (1 - 0.05)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
                 # high_opa_inversigmoid = torch.log(torch.tensor(0.95, device="cuda") / (1 - 0.95)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
 
-                # min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
-                # max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
 
-                effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
-                high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
+                # effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                # high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
                 # effect_range = torch.sqrt(-2 * torch.log(min_opa_inversigmoid) * cov_t)
                 # high_opa_effect_range = torch.sqrt(-2 * torch.log(high_opa_inversigmoid) * cov_t)
 
-                # effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
-                # high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
+                effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
+                high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
 
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
@@ -601,6 +601,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 depth = render_pkg["depth"]
                 # print("min depth", depth.min())
                 # loss += torch.clip(0.5 - depth, min = 0.0).mean()
+                loss += 0.01 * gaussians._specular2[visibility_filter, gaussians.gsdim:].abs().mean()
+
                 if iteration > 0 and visibility_filter.sum() > 0:
                     scale = gaussians.get_scaling[visibility_filter]
                     sorted_scale, _ = torch.sort(scale, dim=-1)
