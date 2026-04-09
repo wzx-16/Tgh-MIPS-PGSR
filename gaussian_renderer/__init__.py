@@ -453,10 +453,12 @@ def render_3d_pgsr_anti(
     dir_pp = None,
     pc: GaussianModel = None,
     iteration = 0,
-    timestamp = 0.0,
+    timestamp = None,
 
 ):
     means3D = xyz
+    if timestamp is None:
+        timestamp = viewpoint_camera.timestamp
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
     screenspace_points_abs = torch.zeros_like(means3D, dtype = means3D.dtype, requires_grad = True, device = "cuda") + 0
@@ -710,7 +712,7 @@ def render_3d_pgsr_anti(
         #print(wo_xyz)
         spec_level = rendered_roughness.reshape(-1, 1)[select_index]
 
-        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0).reshape(-1, pc.sph_dim)
+        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp).reshape(-1, pc.sph_dim)
         #reflectance = pc.brdf_mlp.shade_fg(wo.unsqueeze(2), rendered_global_normal.unsqueeze(2), rendered_specular.unsqueeze(2), rendered_roughness.unsqueeze(2))
         #spec_feat = spec_feat * reflectance.reshape(-1, 3)[select_index].mean(-1, keepdim=True)
         #print(spec_feat)

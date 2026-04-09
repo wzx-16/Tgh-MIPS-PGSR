@@ -35,11 +35,15 @@ class SphMipEncoding(nn.Module):
         feature_dim: int = 16,
         Sn: int = 1,
         dim: int = 1,
-        rand_init: bool = False
+        rand_init: bool = False,
+        time_min: float = 0.0,
+        time_max: float = 1.0,
     ):
         super(SphMipEncoding, self).__init__()
         self.n_levels = n_levels
         self.plane_size = plane_size
+        self.time_min = float(time_min)
+        self.time_max = float(time_max)
         
         self.register_parameter("fm", nn.Parameter(torch.zeros(Sn, dim, plane_size, 2*plane_size, feature_dim)),)
         
@@ -48,32 +52,61 @@ class SphMipEncoding(nn.Module):
 
     def init_parameters(self) -> None:
         nn.init.uniform_(self.fm, -1e-2, 1e-2)
+
+    def _sample_feature_map(self, fm, decomposed_x, level):
+        padding_fm = torch.cat([fm[:, :, self.plane_size:, :], fm, fm[:, :, :self.plane_size, :]], dim=2)
+
+        enc = nvdiffrast.torch.texture(
+            padding_fm,
+            decomposed_x,
+            mip_level_bias=level * self.n_levels,
+            boundary_mode="clamp",
+            max_mip_level=self.n_levels - 1,
+        )
+        return enc.permute(1, 2, 0, 3).contiguous().view(decomposed_x.shape[0], -1)
+
+    def _interpolate_feature_map(self, timestamp, device, dtype):
+        key_count = self.fm.shape[0]
+        if key_count <= 1 or timestamp is None:
+            return None
+
+        if torch.is_tensor(timestamp):
+            time_value = timestamp.detach().to(device=device, dtype=dtype).reshape(-1).mean()
+        else:
+            time_value = torch.tensor(float(timestamp), device=device, dtype=dtype)
+
+        time_min = float(getattr(self, "time_min", 0.0))
+        time_max = float(getattr(self, "time_max", 1.0))
+        denom = max(time_max - time_min, 1.0e-6)
+
+        normalized_t = torch.clamp((time_value - time_min) / denom, 0.0, 1.0)
+        scaled_t = normalized_t * (key_count - 1)
+        key0 = int(torch.floor(scaled_t).item())
+        key1 = min(key0 + 1, key_count - 1)
+        alpha = (scaled_t - key0).to(dtype=self.fm.dtype)
+
+        return torch.lerp(self.fm[key0], self.fm[key1], alpha)
         
-    def forward(self, x, level, index=0, weight=False):
+    def forward(self, x, level, index=0, weight=False, timestamp=None):
         """
         x: [0,1], Nx3
         level: [0, max_level], Nx1
         """
+        x = x.clone()
         x[..., 0] = x[..., 0] * 0.5 + 0.25
         
-        decomposed_x = x
+        decomposed_x = x.contiguous()
         
         level = torch.broadcast_to(level, decomposed_x.shape[:3]).contiguous()
-        
-        fm = self.fm[index]  # [N, L, 2L, feat_dim]
-        
-        padding_fm = torch.cat([fm[:, :, self.plane_size:, :], fm, fm[:, :, :self.plane_size, :]], dim=2)
-        
-        enc = nvdiffrast.torch.texture(
-            padding_fm,
-            decomposed_x,
-            mip_level_bias=level*self.n_levels,
-            boundary_mode="clamp",
-            max_mip_level=self.n_levels - 1,
-        )
-        
-        enc = (enc.permute(1, 2, 0, 3).contiguous().view(x.shape[0], -1,))
-        return enc
+
+        fm = self._interpolate_feature_map(timestamp, decomposed_x.device, decomposed_x.dtype)
+        if fm is None:
+            if torch.is_tensor(index):
+                index = int(index.reshape(-1)[0].item())
+            key_idx = max(0, min(int(index), self.fm.shape[0] - 1))
+            fm = self.fm[key_idx]
+
+        return self._sample_feature_map(fm, decomposed_x, level)
     
 
 def fetchPly(path):
@@ -173,6 +206,11 @@ class GaussianModel:
         self.sph_dim = 16
         self.dim = 1
         self.gsdim = 4
+        self.sph_time_keyframes = 3
+        # self.sph_time_min = float(self.time_duration[0])
+        # self.sph_time_max = float(self.time_duration[1])
+        self.sph_time_min = 1.6666666666666667
+        self.sph_time_max = 2.6333333333333333
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -191,7 +229,16 @@ class GaussianModel:
         n_levels = 9  
         plane_size = 2**(n_levels)
         run_dim = 256
-        self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
+        self.dir_encoding = SphMipEncoding(
+            n_levels,
+            plane_size,
+            self.sph_dim,
+            self.sph_time_keyframes,
+            self.dim,
+            False,
+            time_min=self.sph_time_min,
+            time_max=self.sph_time_max,
+        ).cuda()
         self.light_mlp = nn.Sequential(
             nn.Linear(self.sph_dim * self.gsdim + self.sph_dim, run_dim),
             nn.ReLU(inplace=True),
