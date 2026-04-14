@@ -55,7 +55,8 @@ if __name__ == '__main__':
     #images = [im for im in images if int(im[11:17]) < 42 and int(im[11:17]) >= 32]
     #images = [im for im in images if int(im[15:21]) == 0]
     #images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 70)]
-    images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 50)]
+    # images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 50)]
+    images = [im for im in images if (int(im[15:21]) < 80 and int(im[15:21]) >= 20)]
     #images = [im for im in images if (int(im[15:21]) == 71)]
     cams = sorted(set([im[7:14] for im in images]))
     #print(images)

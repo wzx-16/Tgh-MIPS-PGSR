@@ -515,7 +515,9 @@ def render_3d_pgsr_anti(
 
     xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / (pc.get_sigma_t + 1)
     view_pos = viewpoint_camera.camera_center
-    diffuse   = pc.get_diffuse(dir_pp)
+    diffuse = pc.get_diffuse(dir_pp)
+    rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
+    rgb = torch.clamp_min(rgb + 0.5, 0.0)
     ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
     ENV_RADIUS = 8
     outside_mask = get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)
@@ -525,24 +527,33 @@ def render_3d_pgsr_anti(
     #diffuse = torch.clamp_min(diffuse + 0.5, 0.0)
     #diffuse   = torch.logit(pc.get_diffuse.clamp(0 + 1e-6, 1 - 1e-6)) + 1.098612
     specular  = pc.get_specular
+    albedo = pc.get_albedo
     specular2 = pc.get_specular2
     #specular2 = pc._specular2
     roughness = pc.get_roughness
-    if iteration > 1000000:
-        color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
-        #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
-        #color = color + color2
-        #color = diffuse
-        #color = linear2srgb(color)
-        shs = None
-        colors_precomp = color.squeeze() 
-    elif iteration < 0:
-        #color = torch.sigmoid(diffuse - np.log(3.0))
-        color = diffuse
+    color = torch.zeros_like(diffuse)
+    # if iteration > 1000000:
+    #     color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
+    #     #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
+    #     #color = color + color2
+    #     #color = diffuse
+    #     #color = linear2srgb(color)
+    #     shs = None
+    #     colors_precomp = color.squeeze() 
+    # elif iteration < 0:
+    #     #color = torch.sigmoid(diffuse - np.log(3.0))
+    #     color = diffuse
+    #     colors_precomp = color.squeeze() 
+    #     shs = None
+    if iteration < 15000:
+        color = rgb
         colors_precomp = color.squeeze() 
         shs = None
     else:
-        colors_precomp = None
+        color[~outside_mask] = diffuse[~outside_mask]
+        color[outside_mask] = rgb[outside_mask]
+        colors_precomp = color.squeeze() 
+        shs = None
 
     if mask is not None:
         means2D = means2D[mask]
@@ -563,6 +574,7 @@ def render_3d_pgsr_anti(
         gs_in = gs_in[mask]
         gs_out = gs_out[mask]
         diffuse = diffuse[mask]
+        albedo = albedo[mask]
 
     #shs = None
 
@@ -610,10 +622,11 @@ def render_3d_pgsr_anti(
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
-    if iteration >= 15000:
+    if iteration >= 30000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature
+    input_all_map[:, 16:19] = albedo
     input_all_map[:, 27:28] = gs_in
     input_all_map[:, 28:29] = gs_out
     input_all_map[:, 29:32] = diffuse
@@ -664,6 +677,7 @@ def render_3d_pgsr_anti(
     rendered_roughness = out_all_map[8:9]
     rendered_global_normal = out_all_map[9:12]
     rendered_specular2 = out_all_map[12:16]
+    rendered_albedo = out_all_map[16:19]
     rendered_diffuse = out_all_map[29:32]
     rendered_global_normal = torch.nn.functional.normalize(rendered_global_normal.permute(1, 2, 0), dim=2, eps=1e-6)
     rendered_specular = rendered_specular.permute(1, 2, 0)
@@ -692,7 +706,7 @@ def render_3d_pgsr_anti(
     with torch.no_grad():
         select_index = (rendered_in.reshape(-1,) > 0.05).nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 5000:
+    if iteration >= 15000:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx

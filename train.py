@@ -161,12 +161,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     while iteration < opt.iterations + 1:
         if iteration <= 3000:
             densification_interval = 100
-        elif iteration < 15000:
+        elif iteration < 12000:
             densification_interval = 200
         elif iteration < 25000:
+            densification_interval = 300
+        elif iteration < 30000:
             densification_interval = 500
         else:
-            densification_interval = 500
+            densification_interval = 1000
         for batch_data in training_dataloader:
             #train_start = time.time()
             iteration += 1
@@ -361,6 +363,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # d_viewdir_normalized = safe_normalize(view_pos - )
                 # reflvec = safe_normalize(reflect(d_viewdir_normalized, render_pkg["rendered_normal"]))
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+                # render_image = render_pkg["render_image"]
+                # render_albedo = render_pkg["render_albedo"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
                 
                 # render_end = time.time()
@@ -419,7 +423,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     avg_diff_render = torch.mean(torch.abs(render_depth - render_depth.median()))
                     render_depth_norm = (render_depth - render_depth.median()) / avg_diff_render
                     depth_grad = (1 - get_img_grad_weight_grey(predicted_depth)).detach()
-                    if iteration < 1000:
+                    if iteration < 3000:
                         pass
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
@@ -429,11 +433,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #     loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     # elif iteration < 30000:
                     #     loss += 0.3 * decay_weight * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
-                    if iteration % 100 == 1:
+                    if iteration % 100 == 0:
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
-                        torchvision.utils.save_image(render_depth_image, "render_depth.png")
-                        torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
+                        torchvision.utils.save_image(render_depth_image, f"test_depth/render_depth_{iteration}.png")
+                        torchvision.utils.save_image(predicted_depth_image, f"test_depth/predicted_depth_{iteration}.png")
 
                 if iteration < 0:
                     with torch.no_grad():
@@ -472,10 +476,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print("depth size", predicted_depth.shape)
                     #depth_grad = get_img_grad_weight_grey(predicted_depth)
                     #print("depth grad", depth_grad.shape)
-                    if iteration < 1000:
+                    if iteration < 3000:
                         pass
                     elif iteration < 60000:
-                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                        loss += 0.02 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     # elif iteration < 15000:
                     #     loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     #     #loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
@@ -487,14 +491,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #     loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
                     # elif iteration >= 20000:
                     #     loss += 0.02 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
-                    if iteration % 100 == 1:
+                    if iteration % 100 == 0:
                     #predicted_normal_image = (predicted_normal - predicted_normal.min()) / (predicted_normal.max() - predicted_normal.min())
                     #render_normal_image = (render_normal - render_normal.min()) / (render_normal.max() - render_normal.min())
                         # render_normal_norm[0, 0:30, 0:30] = 0
                         # render_normal_norm[1, 0:30, 0:30] = 1
                         # render_normal_norm[2, 0:30, 0:30] = 0
-                        torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
-                        torchvision.utils.save_image((normal_norm + 1) / 2, "predicted_normal.png")
+                        torchvision.utils.save_image((render_normal_norm + 1) / 2, f"test_normal/render_normal_{iteration}.png")
+                        torchvision.utils.save_image((normal_norm + 1) / 2, f"test_normal/predicted_normal_{iteration}.png")
                 #print("loss 2", loss)
                 #depth_image = depth_image.detach().cpu().numpy() * 255
                 # depth_image = depth_image.detach().cpu().numpy() * 255
@@ -581,13 +585,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
                 loss += 0.1 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
-                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 16, min=0.0).mean()
+                #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 16, min=0.0).mean()
+                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 6, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 2, min=0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.4, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
-                loss += 1 * torch.clip(gaussians.get_t - 1.6666666666666667, min = 0.0).mean()
+                # loss += 1 * torch.clip(gaussians.get_t - 1.6666666666666667, min = 0.0).mean()
+                # loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - 0.6666666666666666, min = 0.0).mean()
                 loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(2.4 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(2.3666666666666667 - gaussians.get_t, min = 0.0).mean()
@@ -625,8 +632,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # single-view loss
                 if iteration > 3000:
-                    if iteration < 6000:
-                        weight = 0.1
+                    if iteration < 12000:
+                        weight = 0.05
                     else:
                         weight = 0.1
                     normal = render_pkg["rendered_normal"]
@@ -656,12 +663,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #     # cv2.imwrite("./test/debug_render1.png", (((de0-de0.min())/(de0.max()-de0.min())).clip(min=0, max=1).squeeze()[..., None][..., [0]*3].detach().cpu().numpy() * 255).astype(np.uint8))
 
-                    # image_weight = (1.0 - get_img_grad_weight(gt_image))
-                    # image_weight = (image_weight).clamp(0,1).detach() ** 2
+                    image_weight = (1.0 - get_img_grad_weight(gt_image))
+                    image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
-                        #normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-                        normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
+                        if iteration <= 6000:
+                            normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
+                        else:
+                            normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
                         #normal_grad_loss = 0.01 * (depth_grad * ((render_normal_grad.detach() - depth_normal_grad).abs().sum(dim=0))).mean()
                         #pass
                     else:
@@ -679,7 +688,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration >= 1000:
                         loss += 0.01 * (gaussians.get_delta_normal**2).mean()
                     # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
-                    if (iteration > opt.densify_from_iter and iteration <= 15000):
+                    if (iteration > opt.densify_from_iter and iteration <= 25000):
                         #pass
                         # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
                         # ENV_RADIUS = 8
@@ -692,7 +701,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
-                    if iteration > 3000:
+                    if iteration > 12000:
                         loss += density_loss * 0.01
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
@@ -787,7 +796,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
                         # if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2) and not (iteration > opt.densify_until_iter and iteration < opt.densify_from_iter2):
-                        if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2):
+                        if iteration >= 20000 and (iteration % densification_interval) > (densification_interval // 2):
                             add_specular_grads = True
                         else:
                             add_specular_grads = False
@@ -801,11 +810,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        if iteration >= 8000:
+                        if iteration >= 20000:
                             densify_split_time = True
                         else:
                             densify_split_time = False
                         spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and densify_split_time) else None
+                        if iteration <= 30000 and spec_time_thr is not None:
+                            spec_time_thr = spec_time_thr / 3
                         # if densify_split_time:
                         #     if iteration < 10000:
                         #         spec_time_thr = opt.densify_specular_time_threshold
@@ -824,7 +835,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # print("reset opacity")
                         # if iteration == opt.opacity_reset_interval:
                         #     gaussians.reset_opacity()
-                        if iteration < 15000:
+                        if iteration < 20000:
                             gaussians.reset_opacity_high()
                         #gaussians.reset_specular_high()
                         # gaussians.reset_feature()

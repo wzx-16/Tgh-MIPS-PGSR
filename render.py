@@ -115,13 +115,13 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
         #mt = torch.sigmoid((mt - 0.5) * 14)
         #mt = torch.sigmoid((mt - 0.5) * (12 + gaussians.get_specular[..., 0:1]))
-        # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-        # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-        # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+        scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+        min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+        mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
         opacity = gaussians.get_opacity * mt
         #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
-        iteration = 50000
+        iteration = 60000
         #shs = None
         # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
         # if iteration <= 5000:

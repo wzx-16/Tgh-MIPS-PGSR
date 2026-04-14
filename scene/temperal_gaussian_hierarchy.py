@@ -363,6 +363,7 @@ class TemperalGaussianHierarchy():
             gaussians._velocity3,
             gaussians._rot_velocity,
             gaussians._specular,
+            gaussians._albedo,
             gaussians._specular2,
             gaussians._delta_normal,
             gaussians._roughness
@@ -482,6 +483,7 @@ class TemperalGaussianHierarchy():
             gaussians._velocity3,
             gaussians._rot_velocity,
             gaussians._specular,
+            gaussians._albedo,
             gaussians._specular2,
             gaussians._delta_normal,
             gaussians._roughness
