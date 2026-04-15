@@ -622,7 +622,7 @@ def render_3d_pgsr_anti(
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
-    if iteration >= 30000:
+    if iteration >= 35000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature

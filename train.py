@@ -161,7 +161,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     while iteration < opt.iterations + 1:
         if iteration <= 3000:
             densification_interval = 100
-        elif iteration < 12000:
+        elif iteration < 10000:
             densification_interval = 200
         elif iteration < 25000:
             densification_interval = 300
@@ -281,16 +281,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-                scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-                min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-                mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+                # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+                # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+                # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
                 #mt = torch.sigmoid((mt - 0.5) * 14)
                 # print("mt size and specular size", mt.shape, gaussians.get_specular[..., 0:1].shape)
                 # print("specular max", gaussians.get_specular[..., 0:1].max())
                 # print("specular origin max", gaussians._specular[..., 0:1].max())
                 # print("mt max", mt.max())
                 opacity = gaussians.get_opacity * mt
-                opacity_render = opacity
+                opacity_multiplier = get_opacity_multiplier(0, 10000, iteration)
+                opacity_render = opacity * opacity_multiplier
                 # sigma_noise = 0.8  # 0.8
                 # epsilon_opacity = torch.randn_like(opacity, device=opacity.device) * sigma_noise
                 # epsilon_opacity = torch.clamp(epsilon_opacity, min=-sigma_noise, max=sigma_noise)  # 根据实际训练经验设定合理范围
@@ -408,7 +409,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # loss += 0.1 * ((1 - spec_coeff).mean())
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 0:
+                if iteration < 25000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -439,7 +440,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         torchvision.utils.save_image(render_depth_image, f"test_depth/render_depth_{iteration}.png")
                         torchvision.utils.save_image(predicted_depth_image, f"test_depth/predicted_depth_{iteration}.png")
 
-                if iteration < 0:
+                if iteration < 20000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -571,16 +572,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # min_opa_inversigmoid = torch.log(torch.tensor(0.05, device="cuda") / (1 - 0.05)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
                 # high_opa_inversigmoid = torch.log(torch.tensor(0.95, device="cuda") / (1 - 0.95)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
 
-                min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
-                max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                # min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                # max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
 
-                # effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
-                # high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
+                effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
                 # effect_range = torch.sqrt(-2 * torch.log(min_opa_inversigmoid) * cov_t)
                 # high_opa_effect_range = torch.sqrt(-2 * torch.log(high_opa_inversigmoid) * cov_t)
 
-                effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
-                high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
+                # effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
+                # high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
 
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
@@ -632,7 +633,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # single-view loss
                 if iteration > 3000:
-                    if iteration < 12000:
+                    if iteration <= 6000:
                         weight = 0.05
                     else:
                         weight = 0.1
@@ -667,10 +668,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
-                        if iteration <= 6000:
-                            normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-                        else:
-                            normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
+                        # if iteration <= 6000:
+                        #     normal_loss = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
+                        # else:
+                        normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
                         #normal_grad_loss = 0.01 * (depth_grad * ((render_normal_grad.detach() - depth_normal_grad).abs().sum(dim=0))).mean()
                         #pass
                     else:
@@ -701,7 +702,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
-                    if iteration > 12000:
+                    if iteration > 3000:
                         loss += density_loss * 0.01
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
@@ -796,7 +797,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
                         # if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2) and not (iteration > opt.densify_until_iter and iteration < opt.densify_from_iter2):
-                        if iteration >= 20000 and (iteration % densification_interval) > (densification_interval // 2):
+                        if iteration >= 25000 and (iteration % densification_interval) > (densification_interval // 2):
                             add_specular_grads = True
                         else:
                             add_specular_grads = False
@@ -810,12 +811,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        if iteration >= 20000:
+                        if iteration >= 25000:
                             densify_split_time = True
                         else:
                             densify_split_time = False
                         spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and densify_split_time) else None
-                        if iteration <= 30000 and spec_time_thr is not None:
+                        if iteration <= 35000 and spec_time_thr is not None:
                             spec_time_thr = spec_time_thr / 3
                         # if densify_split_time:
                         #     if iteration < 10000:
@@ -835,7 +836,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # print("reset opacity")
                         # if iteration == opt.opacity_reset_interval:
                         #     gaussians.reset_opacity()
-                        if iteration < 20000:
+                        if iteration < 35000:
                             gaussians.reset_opacity_high()
                         #gaussians.reset_specular_high()
                         # gaussians.reset_feature()
@@ -996,6 +997,13 @@ def get_decay_weight(start_iteration, end_iteration, current_iteration):
     if current_iteration >= end_iteration:
         return 0.05
     return 1 * (end_iteration - current_iteration) / (end_iteration - start_iteration) + 0.1 * (current_iteration - start_iteration) / (end_iteration - start_iteration)
+
+def get_opacity_multiplier(start_iteration, end_iteration, current_iteration):
+    if current_iteration < start_iteration:
+        return 0.6
+    if current_iteration >= end_iteration:
+        return 1
+    return 0.6 * (end_iteration - current_iteration) / (end_iteration - start_iteration) + 1 * (current_iteration - start_iteration) / (end_iteration - start_iteration)
 
 if __name__ == "__main__":
     # Set up command line argument parser
