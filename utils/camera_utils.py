@@ -81,7 +81,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         normal = np.load(normal_path)
     else:
         normal = None
-        print(normal_path)
+        #print(normal_path)
     #normal = None
 
     depth_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_depth", cam_info.image_name + ".npy"))

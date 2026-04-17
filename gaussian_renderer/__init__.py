@@ -794,7 +794,7 @@ def render_3d_pgsr_anti(
         rendered_image = linear2srgb(rendered_image + spec_rgb)
     else:
         #rendered_image = rendered_image
-        rendered_image = linear2srgb(rendered_image)
+        rendered_image = rendered_image
     # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
     
     return_dict =  {"render": rendered_image,

@@ -1184,6 +1184,10 @@ class GaussianModel:
     @property
     def get_sigma_t(self):
         return self.scaling_activation(self._scaling_t) ** 2
+
+    @property
+    def get_sigma_t_fixed(self):
+        return torch.clip(self.scaling_activation(self._scaling_t) ** 2, min=1.0)
     
     @property
     def get_scaling_xyzt(self):
@@ -1536,9 +1540,11 @@ class GaussianModel:
                         # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 1000
                         dist_t = (torch.zeros_like(fused_times, device=self.device) + seg / 2) / 1
                         #scales_t = torch.log(torch.sqrt(dist_t))
-                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.1)) * dist_t)
+                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
                         if self.rot_4d:
-                            velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
+                            # velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
+                            velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (torch.clip(self.scaling_activation(scales_t) ** 2, min=1.0))) 
+                            #velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30)
                             velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1803,10 +1809,10 @@ class GaussianModel:
             if training_args.position_t_lr_init < 0:
                 training_args.position_t_lr_init = training_args.position_lr_init
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
-            l.append({'params': [self._t], 'lr': training_args.position_t_lr_init * self.spatial_lr_scale, "name": "t"})
+            l.append({'params': [self._t], 'lr': training_args.position_t_lr_init * self.spatial_lr_scale / 3, "name": "t"})
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
             if self.rot_4d:
-                l.append({'params': [self._velocity], 'lr': training_args.rotation_lr, "name": "velocity"})
+                l.append({'params': [self._velocity], 'lr': training_args.rotation_lr / 10, "name": "velocity"})
                 l.append({'params': [self._velocity2], 'lr': training_args.rotation_lr / 50, "name": "velocity2"})
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
@@ -1826,8 +1832,8 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr,
-                                                    lr_final=training_args.rotation_lr / 2,
+        self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 10,
+                                                    lr_final=training_args.rotation_lr / 20,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         self.velocity2_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 50,
@@ -1846,8 +1852,8 @@ class GaussianModel:
                                         lr_final=training_args.encoding_lr_final,
                                         lr_delay_mult=training_args.encoding_lr_delay_mult,
                                         max_steps=training_args.encoding_lr_max_steps)
-        self.t_scheduler_args = get_expon_lr_func(lr_init=training_args.position_t_lr_init * self.spatial_lr_scale,
-                                                    lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 2,
+        self.t_scheduler_args = get_expon_lr_func(lr_init=training_args.position_t_lr_init * self.spatial_lr_scale / 3,
+                                                    lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 6,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
@@ -1875,22 +1881,22 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 #return lr
-            if param_group["name"] == "velocity":
-                lr = self.velocity_scheduler_args(iteration)
-                param_group["lr"] = lr
-                #return lr
+            # if param_group["name"] == "velocity":
+            #     lr = self.velocity_scheduler_args(iteration)
+            #     param_group["lr"] = lr
+            #     #return lr
             if param_group["name"] == "brdf_mlp":
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
                 #return lr
-            if param_group["name"] == "t":
-                lr = self.t_scheduler_args(iteration)
-                param_group["lr"] = lr
-                #return lr
-            if param_group["name"] == "scaling_t":
-                lr = self.scaling_t_scheduler_args(iteration)
-                param_group["lr"] = lr
-                #return lr
+            # if param_group["name"] == "t":
+            #     lr = self.t_scheduler_args(iteration)
+            #     param_group["lr"] = lr
+            #     #return lr
+            # if param_group["name"] == "scaling_t":
+            #     lr = self.scaling_t_scheduler_args(iteration)
+            #     param_group["lr"] = lr
+            #     #return lr
             if param_group["name"] == "specular2":
                 lr = self.specular_feature_scheduler_args(iteration)
                 param_group["lr"] = lr
@@ -2236,7 +2242,7 @@ class GaussianModel:
         new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
         new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
         #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
-        new_velocity = (self._velocity[selected_pts_mask] * ((self.get_scaling_t[selected_pts_mask] * 0.501)**2 + 1)/ (self.get_sigma_t[selected_pts_mask] + 1)).repeat(N,1)
+        new_velocity = (self._velocity[selected_pts_mask] * (torch.clip((self.get_scaling_t[selected_pts_mask] * 0.501)**2, min=1.0) + 1) / (self.get_sigma_t_fixed[selected_pts_mask] + 1)).repeat(N,1)
         # new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
         # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
         #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
@@ -2459,6 +2465,8 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
+        new_opacities = self.inverse_opacity_activation(1 - (1 - self.opacity_activation(new_opacities)) ** 0.5)
+        self._opacity[selected_pts_mask].data = new_opacities
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_t = None

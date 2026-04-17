@@ -8,7 +8,7 @@ batch_size: 1
 exhaust_test: True
 
 ModelParams:
-  sh_degree: 3
+  sh_degree: 1
   source_path: "data/N3V/abuzabi"
   model_path: "output/N3V/abuzabi"
   images: "images"
@@ -63,7 +63,7 @@ OptimizationParams:
   densify_grad_t_threshold: 0.002
   densify_until_num_points: -1
   final_prune_from_iter: -1
-  sh_increase_interval: 20000
+  sh_increase_interval: 15000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0

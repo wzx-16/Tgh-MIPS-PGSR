@@ -108,20 +108,20 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         # time_range3 = time_range_offset**2 * time_range
         # time_range2 = time_range**2
         # time_range3 = time_range**3
-        xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
+        xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t_fixed + 1)
         #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)
         #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
         #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
         #mt = torch.sigmoid((mt - 0.5) * 14)
         #mt = torch.sigmoid((mt - 0.5) * (12 + gaussians.get_specular[..., 0:1]))
-        scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-        min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-        mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+        # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
+        # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
+        # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
         opacity = gaussians.get_opacity * mt
         #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
-        iteration = 60000
+        iteration = 80000
         #shs = None
         # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
         # if iteration <= 5000:
