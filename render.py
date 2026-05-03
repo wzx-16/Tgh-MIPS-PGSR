@@ -38,6 +38,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     spec_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_specular")
     alpha_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_alpha")
     in_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_in")
+    error_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "error")
+    delta_normal_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_delta_normal")
     # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     # pipe.model.eval()
@@ -52,6 +54,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     makedirs(spec_path, exist_ok=True)
     makedirs(alpha_path, exist_ok=True)
     makedirs(in_path, exist_ok=True)
+    makedirs(error_path, exist_ok=True)
+    makedirs(delta_normal_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -121,7 +125,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         opacity = gaussians.get_opacity * mt
         #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
-        iteration = 80000
+        iteration = 45000
         #shs = None
         # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
         # if iteration <= 5000:
@@ -154,12 +158,14 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         depth_normal = (render_package["depth_normal"] + 1.0) / 2
         rendered_normal = (render_package["rendered_normal"] + 1.0) / 2
         render_depth = render_package["depth"]
-        gt = view[0][0:3, :, :]
+        gt = view[0][0:3, :, :].cuda()
+        error_map = torch.abs(rendering - gt)
         #feature_map = render_package["rendered_feature"].detach()
         feature_map = render_package["feature_map"]
         spec_rgb = render_package["spec_rgb"]
         render_alpha = render_package["alpha"]
         render_in = render_package["rendered_in"]
+        rendered_delta_normal = render_package["rendered_delta_normal"]
         psnr_avg += psnr(rendering.clamp(0.0, 1.0), gt.cuda())
         # h, w = feature_map.shape[1:]
         # flat_feature = feature_map.permute(1, 2, 0).reshape(-1, 4)
@@ -194,8 +200,11 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         torchvision.utils.save_image((feature_map[0:3] + 1) / 2, os.path.join(feature_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image((render_alpha - 0.9) * 10, os.path.join(alpha_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(render_in, os.path.join(in_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image(error_map, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
         if spec_rgb is not None:
             torchvision.utils.save_image(spec_rgb, os.path.join(spec_path, 'spec_rgb_{0:05d}'.format(idx) + ".png"))
+        if rendered_delta_normal is not None:
+            torchvision.utils.save_image((rendered_delta_normal + 1) / 2, os.path.join(delta_normal_path, '{0:05d}'.format(idx) + ".png"))
     psnr_avg /= len(views)
     #print(psnr_avg.shape)
     print("Average PSNR: {:.2f}".format(psnr_avg.mean()))

@@ -518,8 +518,9 @@ def render_3d_pgsr_anti(
     diffuse = pc.get_diffuse(dir_pp)
     rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
     rgb = torch.clamp_min(rgb + 0.5, 0.0)
-    ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-    ENV_RADIUS = 8
+    ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
+    # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+    ENV_RADIUS = 1.6
     outside_mask = get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)
     gs_in = torch.ones_like(opacity)
     gs_in[outside_mask] = 0.0
@@ -531,6 +532,7 @@ def render_3d_pgsr_anti(
     specular2 = pc.get_specular2
     #specular2 = pc._specular2
     roughness = pc.get_roughness
+    delta_normal = pc.get_delta_normal
     color = torch.zeros_like(diffuse)
     # if iteration > 1000000:
     #     color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
@@ -545,7 +547,7 @@ def render_3d_pgsr_anti(
     #     color = diffuse
     #     colors_precomp = color.squeeze() 
     #     shs = None
-    if iteration < 15000:
+    if iteration < 1000:
         color = rgb
         colors_precomp = color.squeeze() 
         shs = None
@@ -575,6 +577,7 @@ def render_3d_pgsr_anti(
         gs_out = gs_out[mask]
         diffuse = diffuse[mask]
         albedo = albedo[mask]
+        delta_normal = delta_normal[mask]
 
     #shs = None
 
@@ -599,6 +602,7 @@ def render_3d_pgsr_anti(
     # # rotations = rotations.detach()
     # # print(cov, eigenvalues, eigenvectors)
     global_normal = get_normal(scales, rotations, viewpoint_camera.camera_center, means3D)
+    global_normal_adjusted = global_normal + delta_normal
     local_normal = global_normal @ viewpoint_camera.world_view_transform[:3,:3]
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
@@ -622,11 +626,13 @@ def render_3d_pgsr_anti(
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
-    if iteration >= 35000:
+    if iteration >= 25000000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature
     input_all_map[:, 16:19] = albedo
+    input_all_map[:, 19:22] = global_normal_adjusted
+    input_all_map[:, 22:25] = delta_normal
     input_all_map[:, 27:28] = gs_in
     input_all_map[:, 28:29] = gs_out
     input_all_map[:, 29:32] = diffuse
@@ -676,10 +682,13 @@ def render_3d_pgsr_anti(
     rendered_out = out_all_map[28:29]
     rendered_roughness = out_all_map[8:9]
     rendered_global_normal = out_all_map[9:12]
+    rendered_global_normal_adjusted = out_all_map[19:22]
+    rendered_delta_normal = out_all_map[22:25]
     rendered_specular2 = out_all_map[12:16]
     rendered_albedo = out_all_map[16:19]
     rendered_diffuse = out_all_map[29:32]
     rendered_global_normal = torch.nn.functional.normalize(rendered_global_normal.permute(1, 2, 0), dim=2, eps=1e-6)
+    rendered_global_normal_adjusted = torch.nn.functional.normalize(rendered_global_normal_adjusted.permute(1, 2, 0), dim=2, eps=1e-6)
     rendered_specular = rendered_specular.permute(1, 2, 0)
     rendered_in = rendered_in.permute(1, 2, 0)
     rendered_out = rendered_out.permute(1, 2, 0)
@@ -706,7 +715,7 @@ def render_3d_pgsr_anti(
     with torch.no_grad():
         select_index = (rendered_in.reshape(-1,) > 0.05).nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 15000:
+    if iteration >= 1000:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx
@@ -717,10 +726,52 @@ def render_3d_pgsr_anti(
         R = torch.tensor(viewpoint_camera.R, dtype=torch.float32, device='cuda')
         T = torch.tensor(viewpoint_camera.T, dtype=torch.float32, device='cuda')
         #print(rendered_global_normal.size())
-        reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.pixel_camera)
+        if iteration < 50000000:
+            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.pixel_camera)
+        else:
+            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal_adjusted, viewpoint_camera.pixel_camera)
         reflec_dir_selected = reflec_dir.reshape(-1, 3)[select_index]
-        wo = -rays_d
+
+        # rendered_global_normal_tp = (cart2sph(rendered_global_normal.reshape(-1, 3)[..., [2,0,1]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
+        # reflect_dir_tp = (cart2sph(reflec_dir.reshape(-1, 3)[..., [2,0,1]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]]
+        # #delta_initial_tp = (cart2sph((rendered_global_normal.reshape(-1, 3) + feature_map)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] - reflect_dir_tp
+        # #input_mlp2 = torch.cat([feature_map2[select_index], reflec_dir.reshape(-1, 3)[select_index], rendered_global_normal.reshape(-1, 3)[select_index], delta_initial[select_index]], dim=-1)
+        # input_mlp2 = torch.cat([feature_map.reshape(-1, 4)[select_index], reflect_dir_tp[select_index], rendered_global_normal_tp[select_index]], dim=-1)
+        # #input_mlp2 = torch.cat([feature_map2[select_index], delta_initial[select_index]], dim=-1)
+        # #input_mlp2 = torch.cat([feature_map2[select_index], reflec_dir.reshape(-1, 3)[select_index], rendered_global_normal.reshape(-1, 3)[select_index],], dim=-1)
+        # #input_mlp2 = torch.cat([feature_map2[select_index], reflec_dir.reshape(-1, 3)[select_index], rendered_global_normal.reshape(-1, 3)[select_index], (rendered_global_normal.reshape(-1, 3) * reflec_dir.reshape(-1, 3)).sum(dim=-1, keepdim=True)[select_index]], dim=-1)
+        # # input_mlp2 = torch.cat([feature_map2, reflec_dir.reshape(-1, 3)], dim=-1)
+        # #input_mlp2 = (feature_map2.reshape(-1, 4, 1) @ reflec_dir.reshape(-1, 1, 3)).reshape(-1, 12)
+        # mlp_output2 = pc.light_mlp_2(input_mlp2).float() / 10
+        # # mlp_result = torch.clamp(mlp_output2, min=-1, max=1)
+        # # delta_reflec = torch.clamp(mlp_output2[..., :3], min=-2, max=2)
+        # # delta_feature = torch.clamp(mlp_output2[..., 3:7], min=-2, max=2)
+        # delta_reflec = torch.tanh(mlp_output2[..., :2])
+
+
+
+        # wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
         wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
+        # if iteration >= 10000:
+        #     wo_xy = wo_xy + delta_reflec.reshape(-1, 2)
+        #     mask_under = wo_xy[..., 0] < 0
+        #     if mask_under.any():
+        #         wo_xy[mask_under, 0] = -wo_xy[mask_under, 0] # Example: -0.1 becomes 0.1
+        #         wo_xy[mask_under, 1] += 0.5                  # Flip to other side of sphere
+
+        #     # Case B: Crossing South Pole (lat > 1) -> Reflect lat, flip long
+        #     mask_over = wo_xy[..., 0] > 1
+        #     if mask_over.any():
+        #         wo_xy[mask_over, 0] = 2.0 - wo_xy[mask_over, 0] # Example: 1.1 becomes 0.9
+        #         wo_xy[mask_over, 1] += 0.5                      # Flip to other side of sphere
+        #     wo_xy[..., 1] = wo_xy[..., 1] % 1.0
+            
+        # wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
+
+
+
+        #wo = -rays_d
+        #wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
 
         wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
         #print(wo_xyz)
@@ -774,6 +825,7 @@ def render_3d_pgsr_anti(
         spec_rgb.reshape(-1, 3)[select_index] = spec_light
         spec_rgb = spec_rgb.permute(2, 0, 1)
 
+        
 
         # spec_coeff = torch.zeros((viewpoint_camera.H, viewpoint_camera.W, 1), device="cuda")
         # spec_coeff.reshape(-1, 1)[select_index] = torch.sigmoid(mlp_output)
@@ -792,6 +844,7 @@ def render_3d_pgsr_anti(
         #rendered_image = linear2srgb(rendered_image + spec_rgb * rendered_specular.permute(2, 0, 1))
         #rendered_image = rendered_image * (rendered_out.permute(2, 0, 1)) + output_rgb * rendered_in.permute(2, 0, 1)
         rendered_image = linear2srgb(rendered_image + spec_rgb)
+        #rendered_image = rendered_image * (rendered_out.permute(2, 0, 1)) + linear2srgb(rendered_albedo * (rendered_in.permute(2, 0, 1)) + spec_rgb)
     else:
         #rendered_image = rendered_image
         rendered_image = rendered_image
@@ -815,6 +868,7 @@ def render_3d_pgsr_anti(
                     "spec_coeff": spec_coeff,
                     "spec_rgb": spec_rgb if spec_rgb is not None else None,
                     "rendered_in": rendered_in.permute(2, 0, 1),
+                    "rendered_delta_normal": rendered_delta_normal,
                     # 'index': index,
                     # 'scales': scales,
                     }
