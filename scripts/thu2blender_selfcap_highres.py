@@ -234,7 +234,7 @@ def main():
             continue
         if args.frame_id >= 0 and frame_idx != args.frame_id:
             continue
-        if frame_idx != 59:
+        if frame_idx >= 60:
             continue
         if cam_key not in camera_dict:
             print(f"[SKIP] no calibration for {filename} -> {cam_key}")

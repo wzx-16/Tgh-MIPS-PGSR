@@ -203,7 +203,7 @@ class GaussianModel:
         self.default_roughness = 0.6
 
         
-        self.sph_dim = 16
+        self.sph_dim = 4
         self.dim = 1
         self.gsdim = 4
         self.sph_time_keyframes = 1
@@ -313,13 +313,17 @@ class GaussianModel:
         #     nn.Linear(run_dim // 4, 4),
         # ).cuda()
         # nn.init.constant_(self.light_mlp_2[-1].bias, 0.0)
+        # Single spec-light MLP: [global_feature, local_feature, roughness, cos(normal, reflect_dir)] -> RGB.
         self.light_mlp_2 = nn.Sequential(
-            nn.Linear(4 + 2 + 2, run_dim),
+            nn.Linear(self.gsdim * 2 + 2, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(run_dim, run_dim),
+            nn.Linear(64, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(run_dim, 7),
+            nn.Linear(64, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, 3),
         ).cuda()
+        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
         self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
 
     def capture(self):
@@ -365,10 +369,10 @@ class GaussianModel:
                 self._albedo,
                 self._specular2,
                 self._delta_normal,
-                self.roughness,
+                self._roughness,
                 self.rot_4d,
                 self.env_map,
-                self.active_sh_degree_t
+                self.active_sh_degree_t,
             )
     
     def restore(self, model_args, training_args):
@@ -411,17 +415,23 @@ class GaussianModel:
             self._albedo,
             self._specular2,
             self._delta_normal,
-            self.roughness,
+            self._roughness,
             self.rot_4d,
             self.env_map,
-            self.active_sh_degree_t) = model_args
+            self.active_sh_degree_t,
+            *_extra_args) = model_args
+
         if training_args is not None:
             self.training_setup(training_args)
             self.xyz_gradient_accum = xyz_gradient_accum
             self.xyz_gradient_accum_abs = xyz_gradient_accum_abs
-            self.t_gradient_accum = t_gradient_accum
+            if self.gaussian_dim == 4:
+                self.t_gradient_accum = t_gradient_accum
             self.denom = denom
-            self.optimizer.load_state_dict(opt_dict)
+            try:
+                self.optimizer.load_state_dict(opt_dict)
+            except Exception as exc:
+                print(f"[GaussianModel] optimizer state restore skipped: {exc}")
 
     def clone_by_mask(self, mask : torch.Tensor, gaussians : "GaussianModel", opt, new_gaussians : "GaussianModel"):
        #new_gaussian = GaussianModel(self.sh_degree, self.gaussian_dim, self.time_duration, self.rot_4d, self.force_sh_3d, self.sh_degree_t)
@@ -1498,8 +1508,8 @@ class GaussianModel:
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
-                # if ii < 81 and ii >= 49:
-                if ii < 60 and ii >= 59:
+                if ii < 81 and ii >= 19:
+                #if ii < 60 and ii >= 0:
                 #if ii == 71:
                 #if ii < 10:
             
@@ -1648,7 +1658,8 @@ class GaussianModel:
             #timestamp = (2.3333333333333335 + 2.4) / 2
             #timestamp = 2.4
             #timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
-            timestamp = (1.9666666666666666 + 1.9666666666666666) / 2
+            #timestamp = (1.9666666666666666 + 1.9666666666666666) / 2
+            timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
             #timestamp = (0.03333333333333333 + 0.03333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
             # if time_duration is not None:
@@ -1667,8 +1678,8 @@ class GaussianModel:
                 # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
                 #dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
-                dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
-                #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 2.3333333333333335) / 2
+                #dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
+                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
                 # dist_t = torch.zeros_like(fused_times, device=self.device)
                 # scales_t = torch.log(torch.sqrt(dist_t))
@@ -2174,9 +2185,11 @@ class GaussianModel:
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
             min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
-            ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-            # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-            ENV_RADIUS = 1.6
+            #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
+            ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+            # ENV_RADIUS = 1.6
+            ENV_RADIUS = 8
+            #ENV_RADIUS = 2
             xyz = self.get_xyz
             outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
             gs_in = torch.ones(xyz.shape[0], device="cuda")
@@ -2514,12 +2527,14 @@ class GaussianModel:
                 # new_velocity3 = self._velocity3[selected_pts_mask]
                 # new_rot_velocity = self._rot_velocity[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
+            self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False):
-        ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-        # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-        ENV_RADIUS = 1.6
+        #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
+        ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+        # ENV_RADIUS = 1.6
+        ENV_RADIUS = 8
+        #ENV_RADIUS = 2
         xyz = self.get_xyz
         outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
         gs_in = torch.ones(xyz.shape[0], device="cuda", dtype=torch.bool)

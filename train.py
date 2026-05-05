@@ -62,6 +62,46 @@ def entropy_loss(alpha):
     loss = torch.mean(loss)
     return loss
 
+def _clone_tensor_attr(src_tensor):
+    cloned = src_tensor.detach().clone()
+    if isinstance(src_tensor, nn.Parameter):
+        return nn.Parameter(cloned.requires_grad_(True))
+    return cloned
+
+def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel, training_args=None):
+    local_model.gsdim = global_model.gsdim
+    local_model.active_sh_degree = global_model.active_sh_degree
+    local_model.active_sh_degree_t = global_model.active_sh_degree_t
+    local_model.max_sh_degree = global_model.max_sh_degree
+    local_model.max_sh_degree_t = global_model.max_sh_degree_t
+    local_model.spatial_lr_scale = global_model.spatial_lr_scale
+    local_model.current_timestamp = global_model.current_timestamp
+    local_model.rot_4d = global_model.rot_4d
+    local_model.gaussian_dim = global_model.gaussian_dim
+    local_model.force_sh_3d = global_model.force_sh_3d
+    local_model.time_duration = global_model.time_duration
+
+    tensor_attrs = [
+        "_xyz", "_features_dc", "_features_rest", "_scaling", "_rotation", "_opacity",
+        "_t", "_scaling_t", "_velocity", "_velocity2", "_velocity3", "_rot_velocity",
+        "_specular", "_albedo", "_specular2", "_delta_normal", "_roughness",
+    ]
+    for attr in tensor_attrs:
+        src_val = getattr(global_model, attr, None)
+        if isinstance(src_val, torch.Tensor):
+            setattr(local_model, attr, _clone_tensor_attr(src_val))
+
+    if isinstance(global_model.max_radii2D, torch.Tensor):
+        local_model.max_radii2D = global_model.max_radii2D.detach().clone()
+
+    if isinstance(global_model.env_map, torch.Tensor):
+        local_model.env_map = global_model.env_map.detach().clone()
+
+    if training_args is not None:
+        if local_model.brdf_mlp is None or local_model.light_mlp is None or local_model.light_mlp_2 is None or local_model.dir_encoding is None:
+            local_model.init_light_env()
+        local_model.training_setup(training_args)
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id):
     
@@ -85,8 +125,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     # tb_writer = prepare_output_and_logger(dataset)
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
+    local_gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
     gaussians.init_light_env()
-    scene = Scene(dataset, gaussians, tgh, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
+    scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     
     #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
     
@@ -95,9 +136,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gaussians.restore(model_params, opt)
         scene.tgh.create_from_gaussians(gaussians)
         gaussian_init_flag = True
+        initialize_local_gaussian_model(gaussians, local_gaussians, opt)
     else:
         gaussian_init_flag = False
         gaussians.training_setup(opt)
+        if not getattr(scene, "local_gaussians_loaded", False):
+            initialize_local_gaussian_model(gaussians, local_gaussians, opt)
+        else:
+            print("Using restored local Gaussian checkpoint.")
     #print("test5")
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -177,10 +223,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             iter_start.record()
             gaussians.update_learning_rate(iteration)
+            local_gaussians.update_learning_rate(iteration)
             
             # Every 1000 its we increase the levels of SH up to a maximum degree
             if iteration % opt.sh_increase_interval == 0:
                 gaussians.oneupSHdegree()
+                local_gaussians.oneupSHdegree()
             
 
             # Render
@@ -190,6 +238,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             batch_point_grad = []
             batch_visibility_filter = []
             batch_radii = []
+            batch_local_point_grad = []
+            batch_local_visibility_filter = []
+            batch_local_radii = []
             
             #start_t = time.time()
             for batch_idx in range(batch_size):
@@ -201,6 +252,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                     #scene.tgh.put_current_related_gaussians(viewpoint_cam.timestamp, gaussians)
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
+                    local_gaussians.set_current_timestamp(viewpoint_cam.timestamp)
 
                     #pass
                     # put_gaussians_end = time.time()
@@ -211,6 +263,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print(f" cpu to cuda time: {cpu_to_cuda_end - cpu_to_cuda_start:.6f} seconds")
                 else:
                     gaussians.set_current_timestamp(viewpoint_cam.timestamp)
+                    local_gaussians.set_current_timestamp(viewpoint_cam.timestamp)
                 #render_start = time.time()
                 if iteration < 0:
                     with Image.open(viewpoint_cam.image_path.replace("images", "images_delight")) as image_load:
@@ -318,6 +371,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #opacity = opacity * (drop_mask.float() + 0.6).clamp(0, 1).unsqueeze(-1)
                 #ma = torch.logical_and(drop_mask, (mt > 0.05).squeeze())
                 ma = (mt > 0.05).squeeze()
+                local_mt = local_gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+                local_ma = (local_mt > 0.05).squeeze()
                 # mask_drop = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
                 # drop_ratio = 0.1 + ((iteration - 10000) * 0.1) / (30000 - 10000)
                 # if iteration <= 10000:
@@ -354,7 +409,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
                 dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp)
+                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -366,6 +421,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # reflvec = safe_normalize(reflect(d_viewdir_normalized, render_pkg["rendered_normal"]))
                 image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
                 viewspace_point_tensor_abs = render_pkg["viewspace_points_abs"]
+                local_viewspace_point_tensor = render_pkg["local_viewspace_points"]
+                local_viewspace_point_tensor_abs = render_pkg["local_viewspace_points_abs"]
+                local_visibility_filter = render_pkg["local_visibility_filter"]
+                local_radii = render_pkg["local_radii"]
                 
                 # render_end = time.time()
                 # torch.cuda.synchronize()
@@ -382,6 +441,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #     torchvision.utils.save_image(spec_coeff, "spec_coeff.png")
                 feature_map = render_pkg["feature_map"]
                 rendered_delta_normal = render_pkg["rendered_delta_normal"]
+                rendered_local_feature_map = render_pkg["local_feature_map"]
                 if iteration % 100 == 0 and feature_map is not None:
                     torchvision.utils.save_image(feature_map[:3], "./test_feature{}/feature_map_{}_{}.png".format(id, viewpoint_cam.image_name, iteration))
                 if iteration % 100 == 0:
@@ -389,6 +449,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image((render_normal + 1) / 2, "render_normal.png")
                 if iteration % 100 == 0 and rendered_delta_normal is not None:
                     torchvision.utils.save_image((rendered_delta_normal + 1) / 2, "rendered_delta_normal.png")
+                if iteration % 100 == 0 and rendered_local_feature_map is not None:
+                    torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, "rendered_local_feature_map.png")
                 #loss_start = time.time()
                 # Loss
                 Ll1 = l1_loss(image, gt_image)
@@ -600,8 +662,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.4, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
-                loss += 1 * torch.clip(gaussians.get_t - 1.9666666666666666, min = 0.0).mean()
-                loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
+                # loss += 1 * torch.clip(gaussians.get_t - 0.0, min = 0.0).mean()
+                # loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - 0.6666666666666666, min = 0.0).mean()
+                loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 0.03333333333333333, min = 0.0).mean()
                 #loss += 1 * torch.clip(0.03333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(2.4 - gaussians.get_t, min = 0.0).mean()
@@ -697,7 +761,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
                     #delta_normal_grad = get_img_grad_weight_avg(rendered_delta_normal)
                     #loss += 0.01 * delta_normal_grad.mean()
-                    if (iteration > opt.densify_from_iter and iteration <= 15000):
+                    if (iteration > opt.densify_from_iter and iteration <= 35000):
                         #pass
                         # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
                         # ENV_RADIUS = 8
@@ -707,6 +771,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
                         loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
+                        if iteration > 6000:
+                            loss += 0.001 * local_gaussians.get_opacity[local_visibility_filter].mean()
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
@@ -720,6 +786,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
+                local_point_grad = torch.zeros((local_viewspace_point_tensor.shape[0],), device=local_viewspace_point_tensor.device)
+                if local_viewspace_point_tensor.grad is not None:
+                    local_point_grad = torch.norm(local_viewspace_point_tensor.grad[:, :2], dim=-1)
+                batch_local_point_grad.append(local_point_grad)
+                batch_local_radii.append(local_radii)
+                batch_local_visibility_filter.append(local_visibility_filter)
                 # loss_end = time.time()
                 # torch.cuda.synchronize()
                 # print(f"loss compute time: {loss_end - loss_start:.6f} seconds")
@@ -733,14 +805,50 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_viewspace_point_grad = torch.stack(batch_point_grad,1).sum(1)
                 batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                 batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
+
+                local_visibility_count = torch.stack(batch_local_visibility_filter, 1).sum(1)
+                local_visibility_filter = local_visibility_count > 0
+                local_radii = torch.stack(batch_local_radii, 1).max(1)[0]
+
+                batch_local_viewspace_point_grad = torch.stack(batch_local_point_grad, 1).sum(1)
+                batch_local_viewspace_point_grad[local_visibility_filter] = batch_local_viewspace_point_grad[local_visibility_filter] * batch_size / local_visibility_count[local_visibility_filter]
+                batch_local_viewspace_point_grad = batch_local_viewspace_point_grad.unsqueeze(1)
                 
                 if gaussians.gaussian_dim == 4:
-                    batch_t_grad = gaussians._t.grad.clone()[:,0].detach()
+                    if gaussians._t.grad is not None:
+                        batch_t_grad = gaussians._t.grad.clone()[:,0].detach()
+                    else:
+                        batch_t_grad = torch.zeros_like(gaussians._t[:, 0].detach())
                     batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                     batch_t_grad = batch_t_grad.unsqueeze(1)
+                else:
+                    batch_t_grad = None
+
+                if local_gaussians.gaussian_dim == 4:
+                    if local_gaussians._t.grad is not None:
+                        local_batch_t_grad = local_gaussians._t.grad.clone()[:, 0].detach()
+                    else:
+                        local_batch_t_grad = torch.zeros_like(local_gaussians._t[:, 0].detach())
+                    local_batch_t_grad[local_visibility_filter] = local_batch_t_grad[local_visibility_filter] * batch_size / local_visibility_count[local_visibility_filter]
+                    local_batch_t_grad = local_batch_t_grad.unsqueeze(1)
+                else:
+                    local_batch_t_grad = None
             else:
                 if gaussians.gaussian_dim == 4:
-                    batch_t_grad = gaussians._t.grad.clone().detach()
+                    if gaussians._t.grad is not None:
+                        batch_t_grad = gaussians._t.grad.clone().detach()
+                    else:
+                        batch_t_grad = torch.zeros_like(gaussians._t.detach())
+                else:
+                    batch_t_grad = None
+
+                if local_gaussians.gaussian_dim == 4:
+                    if local_gaussians._t.grad is not None:
+                        local_batch_t_grad = local_gaussians._t.grad.clone().detach()
+                    else:
+                        local_batch_t_grad = torch.zeros_like(local_gaussians._t.detach())
+                else:
+                    local_batch_t_grad = None
             
             iter_end.record()
             loss_dict = {"Ll1": Ll1,
@@ -801,6 +909,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     densification_interval = 500
                 # Densification
                 # if iteration <= opt.densify_until_iter2 and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                add_specular_grads = False
                 if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
@@ -850,6 +959,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # tgh.reset_opacity()
                     # if iteration % 3000 == 0:
                     #     gaussians.reset_opacity_large()
+
+                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points) and iteration > 15000:
+                    local_gaussians.max_radii2D[local_visibility_filter] = torch.max(local_gaussians.max_radii2D[local_visibility_filter], local_radii[local_visibility_filter])
+                    if batch_size == 1:
+                        if local_viewspace_point_tensor.grad is not None and local_viewspace_point_tensor_abs.grad is not None:
+                            local_gaussians.add_densification_stats_pgsr(local_viewspace_point_tensor, local_viewspace_point_tensor_abs, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None, add_specular_grads)
+                    else:
+                        local_gaussians.add_densification_stats_grad(batch_local_viewspace_point_grad, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None)
+
+                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
+                        local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        if iteration >= 20000:
+                            local_densify_split_time = True
+                        else:
+                            local_densify_split_time = False
+                        local_spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and local_densify_split_time) else None
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr)
+
+                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                        if iteration <= 30000:
+                            local_gaussians.reset_opacity_high()
                 # if iteration == 500000:
                 #     tgh.reset_diffuse()
                 #     gaussians.reset_diffuse()
@@ -861,6 +991,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # copy_and_cat_engine.waitGroupCompletion(0, 0)
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+                    local_gaussians.optimizer.step()
+                    local_gaussians.optimizer.zero_grad(set_to_none = True)
                     # if pipe.env_map_res and iteration < pipe.env_optimize_until:
                     #     env_map_optimizer.step()
                     #     env_map_optimizer.zero_grad(set_to_none = True)
@@ -884,6 +1016,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #gaussians.clone_from_cpu(gaussians_segments)
                     gaussians.reset_param_groups()
                     gaussians.append_state_from_gaussians_cpu(gaussians_segments, state_dict)
+                    initialize_local_gaussian_model(gaussians, local_gaussians, opt)
                 # if save_flag:
                     #torch.save((tgh.capture(gaussians), iteration), scene.model_path + "/tgh_chkpnt_best_after_prune.pth")
                 #cuda_to_cpu_end = time.time()

@@ -9,8 +9,8 @@ exhaust_test: True
 
 ModelParams:
   sh_degree: 1
-  source_path: "data/N3V/abuzabi"
-  model_path: "output/N3V/abuzabi"
+  source_path: "/root/autodl-tmp/projects/Tgh-MIPS-PGSR/data/N3V/abuzabi"
+  model_path: "output/abuzabi"
   images: "images"
   resolution: 1
   white_background: False

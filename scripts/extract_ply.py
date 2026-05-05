@@ -2,10 +2,10 @@ from pathlib import Path
 import shutil
 
 # Folder that contains the numbered folders, e.g. 1100/sparse.ply
-source_root = Path("/root/autodl-tmp/projects/Tghmp_xz1/data/spec_floor/spec_floor_100frame/sparse_points_per_timestamp")
+source_root = Path("/root/autodl-tmp/projects/Tghmp_xz1/data/spec_ball/sparse_points_per_timestamp")
 
 # New folder where renamed .ply files will go
-output_dir = Path("/root/autodl-tmp/projects/Tghmp_xz1/data/spec_floor/pcds_j10")
+output_dir = Path("/root/autodl-tmp/projects/Tghmp_xz1/data/spec_ball/pcds_j10")
 output_dir.mkdir(exist_ok=True)
 
 for ply_path in source_root.glob("*/sparse.ply"):

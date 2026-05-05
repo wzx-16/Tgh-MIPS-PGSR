@@ -27,7 +27,39 @@ from transformers import pipeline as pp
 import numpy as np
 import cv2
 
-def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, background, id):
+def _clone_tensor_attr(src_tensor):
+    cloned = src_tensor.detach().clone()
+    if isinstance(src_tensor, torch.nn.Parameter):
+        return torch.nn.Parameter(cloned.requires_grad_(True))
+    return cloned
+
+def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel):
+    local_model.gsdim = global_model.gsdim
+    local_model.active_sh_degree = global_model.active_sh_degree
+    local_model.active_sh_degree_t = global_model.active_sh_degree_t
+    local_model.max_sh_degree = global_model.max_sh_degree
+    local_model.max_sh_degree_t = global_model.max_sh_degree_t
+    local_model.spatial_lr_scale = global_model.spatial_lr_scale
+    local_model.current_timestamp = global_model.current_timestamp
+    local_model.rot_4d = global_model.rot_4d
+    local_model.gaussian_dim = global_model.gaussian_dim
+    local_model.force_sh_3d = global_model.force_sh_3d
+    local_model.time_duration = global_model.time_duration
+
+    tensor_attrs = [
+        "_xyz", "_features_dc", "_features_rest", "_scaling", "_rotation", "_opacity",
+        "_t", "_scaling_t", "_velocity", "_velocity2", "_velocity3", "_rot_velocity",
+        "_specular", "_albedo", "_specular2", "_delta_normal", "_roughness",
+    ]
+    for attr in tensor_attrs:
+        src_val = getattr(global_model, attr, None)
+        if isinstance(src_val, torch.Tensor):
+            setattr(local_model, attr, _clone_tensor_attr(src_val))
+
+    if isinstance(global_model.max_radii2D, torch.Tensor):
+        local_model.max_radii2D = global_model.max_radii2D.detach().clone()
+
+def render_set(model_path, name, iteration, views, gaussians, local_gaussians, tgh, pipeline, background, id):
     render_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "gt")
     predicted_depth_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "predicted_depth")
@@ -40,6 +72,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     in_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_in")
     error_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "error")
     delta_normal_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_delta_normal")
+    diffuse_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_diffuse")
+    local_feature_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "rendered_local_feature")
     # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     # pipe.model.eval()
@@ -56,6 +90,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
     makedirs(in_path, exist_ok=True)
     makedirs(error_path, exist_ok=True)
     makedirs(delta_normal_path, exist_ok=True)
+    makedirs(diffuse_path, exist_ok=True)
+    makedirs(local_feature_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -141,6 +177,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         #     ma = ma < (1 - 0.3)
         # ma = torch.logical_and(ma, (mt > 0.05).squeeze())
         ma = (mt > 0.05).squeeze()
+        local_mt = local_gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+        local_ma = (local_mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
         gaussians.brdf_mlp.build_mips()
         view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
@@ -151,7 +189,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
         dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, iteration=iteration, timestamp=timestamp)
+                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=timestamp)
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]
@@ -162,10 +200,12 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         error_map = torch.abs(rendering - gt)
         #feature_map = render_package["rendered_feature"].detach()
         feature_map = render_package["feature_map"]
+        local_feature_map = render_package["local_feature_map"]
         spec_rgb = render_package["spec_rgb"]
         render_alpha = render_package["alpha"]
         render_in = render_package["rendered_in"]
         rendered_delta_normal = render_package["rendered_delta_normal"]
+        render_diffuse = render_package["rendered_diffuse"]
         psnr_avg += psnr(rendering.clamp(0.0, 1.0), gt.cuda())
         # h, w = feature_map.shape[1:]
         # flat_feature = feature_map.permute(1, 2, 0).reshape(-1, 4)
@@ -198,6 +238,7 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
         torchvision.utils.save_image(render_depth_image, os.path.join(depth_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image((feature_map[0:3] + 1) / 2, os.path.join(feature_path, '{0:05d}'.format(idx) + ".png"))
+        torchvision.utils.save_image((local_feature_map[0:3] + 1) / 2, os.path.join(local_feature_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image((render_alpha - 0.9) * 10, os.path.join(alpha_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(render_in, os.path.join(in_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(error_map, os.path.join(error_path, '{0:05d}'.format(idx) + ".png"))
@@ -205,6 +246,8 @@ def render_set(model_path, name, iteration, views, gaussians, tgh, pipeline, bac
             torchvision.utils.save_image(spec_rgb, os.path.join(spec_path, 'spec_rgb_{0:05d}'.format(idx) + ".png"))
         if rendered_delta_normal is not None:
             torchvision.utils.save_image((rendered_delta_normal + 1) / 2, os.path.join(delta_normal_path, '{0:05d}'.format(idx) + ".png"))
+        if render_diffuse is not None:
+            torchvision.utils.save_image(render_diffuse, os.path.join(diffuse_path, '{0:05d}'.format(idx) + ".png"))
     psnr_avg /= len(views)
     #print(psnr_avg.shape)
     print("Average PSNR: {:.2f}".format(psnr_avg.mean()))
@@ -213,7 +256,12 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
     with torch.no_grad():
         tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
-        scene = Scene(dataset, gaussians, tgh, shuffle=False, render_only=True, eid=id)
+        local_gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
+        scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, shuffle=False, render_only=True, eid=id)
+        if not getattr(scene, "local_gaussians_loaded", False):
+            initialize_local_gaussian_model(gaussians, local_gaussians)
+        else:
+            print("Using restored local Gaussian checkpoint.")
         current_length = tgh.max_layer_length
         point_cnt = 0
         # for level in range(0, 10):
@@ -227,10 +275,10 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-             render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, tgh, pipeline, background, id)
+               render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, local_gaussians, tgh, pipeline, background, id)
 
         if not skip_test:
-             render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, tgh, pipeline, background, id)
+               render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, local_gaussians, tgh, pipeline, background, id)
 
 if __name__ == "__main__":
     # Set up command line argument parser

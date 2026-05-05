@@ -25,15 +25,18 @@ from scene.NVDIFFREC import save_env_map, load_env
 class Scene:
 
     gaussians : GaussianModel
+    local_gaussians : GaussianModel
     tgh : TemperalGaussianHierarchy
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False, skip_render=False, eid=0):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, tgh : TemperalGaussianHierarchy, local_gaussians: GaussianModel = None, load_iteration=None, shuffle=True, resolution_scales=[1.0], num_pts=100_000, num_pts_ratio=1.0, time_duration=None, render_only=False, skip_render=False, eid=0):
         """b
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
+        self.local_gaussians = local_gaussians
+        self.local_gaussians_loaded = False
         self.tgh = tgh
         self.white_background = args.white_background
 
@@ -115,6 +118,30 @@ class Scene:
             print("Loaded light_mlp param size: {}".format(sum(p.numel() for p in self.gaussians.light_mlp.parameters())))
             # self.gaussians.light_mlp2 = torch.load(args.model_path + f'light{eid}/iteration_'+ iteration +'/light_mlp2.pt', weights_only=False)
             self.gaussians.dir_encoding = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding.pt', weights_only=False)
+
+            if self.local_gaussians is not None:
+                local_map_location = getattr(self.local_gaussians, "device", "cuda")
+                if isinstance(local_map_location, torch.device):
+                    local_map_location = str(local_map_location)
+                if isinstance(local_map_location, str) and local_map_location.startswith("cuda") and not torch.cuda.is_available():
+                    local_map_location = "cpu"
+
+                local_ckpt_candidates = [
+                    os.path.join(self.model_path, f"local{eid}_chkpnt{iteration}.pth"),
+                    os.path.join(self.model_path, f"local_chkpnt{iteration}.pth"),
+                ]
+                for local_ckpt_path in local_ckpt_candidates:
+                    if not os.path.exists(local_ckpt_path):
+                        continue
+                    try:
+                        local_model_args, _ = torch.load(local_ckpt_path, map_location=local_map_location, weights_only=False)
+                        self.local_gaussians.restore(local_model_args, training_args=None)
+                        self.local_gaussians_loaded = True
+                        print(f"Loaded local Gaussians from {local_ckpt_path}")
+                        break
+                    except Exception as exc:
+                        print(f"[Scene] Failed to load local Gaussians from {local_ckpt_path}: {exc}")
+
             # self.gaussians.dir_encoding2 = torch.load(args.model_path + f'dir{eid}/iteration_'+ iteration +'/dir_encoding2.pt', weights_only=False)
             #self.gaussians.brdf_mlp_2 = load_env(torch.load(cubemap_weights_2_path))
         elif skip_render:
@@ -135,6 +162,8 @@ class Scene:
         #torch.save((self.gaussians.capture(), iteration), self.model_path + "/chkpnt1_" + str(iteration) + ".pth")
         #tgh.create_from_gaussians(gaussians)
         torch.save((tgh.capture(self.gaussians, opt), iteration), self.model_path + f"/tgh{id}_chkpnt" + str(iteration) + ".pth")
+        if self.local_gaussians is not None:
+            torch.save((self.local_gaussians.capture(), iteration), self.model_path + f"/local{id}_chkpnt" + str(iteration) + ".pth")
         brdf_mlp_path = os.path.join(self.model_path, f"brdf_mlp{id}/iteration_{iteration}/brdf_mlp.hdr")
         #brdf_mlp_2_path = os.path.join(self.model_path, f"brdf_mlp_2/iteration_{iteration}/brdf_mlp.hdr")
         mkdir_p(os.path.dirname(brdf_mlp_path))
