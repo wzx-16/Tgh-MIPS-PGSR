@@ -550,7 +550,8 @@ def render_3d_pgsr_anti(
 
     local_scaling = local_pc.get_scaling
     local_rotation = local_pc.get_rotation
-    local_feature = local_pc.get_specular2
+    local_feature = local_pc.get_specular
+    #local_feature = local_pc.get_specular2
     if local_feature.shape[1] < pc.gsdim:
         pad = torch.zeros(
             (local_feature.shape[0], pc.gsdim - local_feature.shape[1]),
@@ -643,23 +644,28 @@ def render_3d_pgsr_anti(
     input_all_map[:, 4] = local_distance
     #print("specular", specular)
     #input_all_map[:, 5:8] = specular
-    input_all_map[:, 5:8] = specular
+    #input_all_map[:, 5:8] = specular
     input_all_map[:, 8:9] = roughness
     input_all_map[:, 9:12] = global_normal
     cos_feature = torch.tensor([np.cos(np.pi * (2**i) * 4 * timestamp) for i in range(5)], dtype=torch.float32, device='cuda')
     #cos_feature = torch.tensor([np.cos(np.pi * i * 10 * timestamp) for i in range(4)], dtype=torch.float32, device='cuda')
     sin_feature = torch.tensor([np.sin(np.pi * (2**i) * 4 * timestamp) for i in range(5)], dtype=torch.float32, device='cuda')
     fourier_feature = torch.cat([cos_feature, sin_feature], dim=0)
-    feature = specular2[:, : pc.gsdim]
+    feature = specular
+    #feature = specular2[:, :pc.gsdim]
     # timestamp_feature = torch.tensor([timestamp], dtype=torch.float32, device='cuda').repeat(feature.shape[0], 1)
     # light_mlp2_input = torch.cat([torch.tanh(feature), xyz, timestamp_feature], dim=-1)
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
     local_feature_coeff = local_pc.get_specular2[:, pc.gsdim:] * 2
-    if iteration >= 25000000:
+    if iteration >= 25000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
-        local_feature = local_feature + (local_feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
+    if iteration >= 20000:
+        pass
+        #local_feature = local_feature + (local_feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
+    if iteration < 12000:
+        local_feature = torch.zeros_like(local_feature)
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature
     input_all_map[:, 16:19] = albedo
@@ -894,7 +900,8 @@ def render_3d_pgsr_anti(
         spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp).reshape(-1, pc.sph_dim)
         #wo = -rays_d
         #wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
-
+        spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)
+        #spec_feat_dirc = spec_feat.reshape(-1, pc.sph_dim)
         global_feature_selected = feature_map.reshape(-1, pc.gsdim)[select_index]
         local_feature_selected = local_feature_map.reshape(-1, pc.gsdim)[select_index]
         roughness_selected = rendered_roughness.reshape(-1, 1)[select_index]
@@ -905,11 +912,40 @@ def render_3d_pgsr_anti(
         #     [global_feature_selected, local_feature_selected, roughness_selected, cos_nr],
         #     dim=-1,
         # )
-        input_mlp = torch.cat(
+        # input_mlp = torch.cat(
+        #     [spec_feat, local_feature_selected, roughness_selected, cos_nr],
+        #     dim=-1,
+        # )
+        sph_outer_feature = (spec_feat_wrap @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.sph_dim * pc.gsdim)
+        base_input_mlp = torch.cat(
             [spec_feat, local_feature_selected, roughness_selected, cos_nr],
             dim=-1,
         )
-        mlp_output = pc.light_mlp_2(input_mlp).float()
+        # input_mlp = torch.cat(
+        #     [spec_feat, (spec_feat_wrap @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.sph_dim * pc.gsdim), local_feature_selected * (1 - roughness_selected), roughness_selected, cos_nr],
+        #     dim=-1,
+        # )
+        # input_mlp = torch.cat(
+        #     [spec_feat, (spec_feat_wrap @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.sph_dim * pc.gsdim), local_feature_selected * (1 - roughness_selected.detach()), roughness_selected, cos_nr],
+        #     dim=-1,
+        # )
+        # input_mlp = torch.cat(
+        #     [spec_feat, (spec_feat_wrap @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.sph_dim * pc.gsdim) * roughness_selected, local_feature_selected * (1 - roughness_selected), roughness_selected, cos_nr],
+        #     dim=-1,
+        # )
+        if isinstance(pc.light_mlp_2, torch.nn.Sequential):
+            # Backward compatibility for older checkpoints saved with the previous Sequential layout.
+            input_mlp = torch.cat(
+                [spec_feat, sph_outer_feature, local_feature_selected, roughness_selected, cos_nr],
+                dim=-1,
+            )
+            # input_mlp = torch.cat(
+            #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
+            #     dim=-1,
+            # )
+            mlp_output = pc.light_mlp_2(input_mlp).float()
+        else:
+            mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
         spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")

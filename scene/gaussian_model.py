@@ -107,6 +107,31 @@ class SphMipEncoding(nn.Module):
             fm = self.fm[key_idx]
 
         return self._sample_feature_map(fm, decomposed_x, level)
+
+
+class SpecLightMLP(nn.Module):
+    def __init__(self, base_dim: int, outer_dim: int, hidden_dim: int = 128, out_dim: int = 3):
+        super(SpecLightMLP, self).__init__()
+        self.base_dim = int(base_dim)
+        self.outer_dim = int(outer_dim)
+        self.fc1 = nn.Linear(self.base_dim, hidden_dim)
+        self.fc_outer = nn.Linear(self.outer_dim, hidden_dim, bias=False)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc3 = nn.Linear(hidden_dim, hidden_dim)
+        self.fc_out = nn.Linear(hidden_dim, out_dim)
+        self.act = nn.ReLU(inplace=True)
+
+    def forward(self, base_feature, sph_outer_feature=None):
+        # Compatibility path: accepts concatenated input from older call sites.
+        if sph_outer_feature is None and base_feature.shape[-1] == self.base_dim + self.outer_dim:
+            base_feature, sph_outer_feature = torch.split(base_feature, [self.base_dim, self.outer_dim], dim=-1)
+
+        x = self.act(self.fc1(base_feature))
+        if sph_outer_feature is not None:
+            x = x + self.fc_outer(sph_outer_feature)
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        return self.fc_out(x)
     
 
 def fetchPly(path):
@@ -145,7 +170,7 @@ class GaussianModel:
         self.inverse_opacity_activation = inverse_sigmoid
 
         self.diffuse_activation = torch.sigmoid
-        self.specular_activation = torch.sigmoid
+        self.specular_activation = torch.tanh
         self.specular2_activation = torch.tanh
         self.roughness_activation = torch.sigmoid
 
@@ -203,7 +228,7 @@ class GaussianModel:
         self.default_roughness = 0.6
 
         
-        self.sph_dim = 4
+        self.sph_dim = 16
         self.dim = 1
         self.gsdim = 4
         self.sph_time_keyframes = 1
@@ -314,16 +339,35 @@ class GaussianModel:
         # ).cuda()
         # nn.init.constant_(self.light_mlp_2[-1].bias, 0.0)
         # Single spec-light MLP: [global_feature, local_feature, roughness, cos(normal, reflect_dir)] -> RGB.
+        # self.light_mlp_2 = nn.Sequential(
+        #     nn.Linear(self.gsdim * self.gsdim + self.gsdim * self.sph_dim + self.sph_dim + 2, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 3),
+        # ).cuda()
+        # nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
+
         self.light_mlp_2 = nn.Sequential(
-            nn.Linear(self.gsdim * 2 + 2, 64),
+            nn.Linear(self.gsdim + self.gsdim * self.sph_dim + self.sph_dim + 2, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
+            nn.Linear(128, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 3),
+            nn.Linear(128, 3),
         ).cuda()
-        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
+        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))        
+
+        # self.light_mlp_2 = SpecLightMLP(
+        #     base_dim=self.gsdim + self.sph_dim + 2,
+        #     outer_dim=self.sph_dim * self.gsdim,
+        #     hidden_dim=128,
+        #     out_dim=3,
+        # ).cuda()
+        # nn.init.constant_(self.light_mlp_2.fc_out.bias, np.log(0.25))
         self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
 
     def capture(self):
@@ -702,7 +746,7 @@ class GaussianModel:
         self._velocity2 = torch.empty(0, 3, device=self.device)
         self._velocity3 = torch.empty(0, 3, device=self.device)
         self._rot_velocity = torch.empty(0, 4, device=self.device)
-        self._specular = torch.empty(0, 3, device=self.device)
+        self._specular = torch.empty(0, 4, device=self.device)
         self._albedo = torch.empty(0, 3, device=self.device)
         self._specular2 = torch.empty(0, 44, device=self.device)
         #self._specular2 = torch.empty(0, 20, device=self.device)
@@ -1232,8 +1276,8 @@ class GaussianModel:
     
     @property
     def get_specular(self):
-        # return self.specular_activation(self._specular)
-        return torch.exp(torch.clamp(self._specular, max=3.0))
+        return self.specular_activation(self._specular)
+        #return torch.exp(torch.clamp(self._specular, max=3.0))
         # bias = torch.tensor(5.0, dtype=torch.float32).to("cuda")
         # return torch.exp(torch.clamp(self._specular, max=5.0))
 
@@ -1362,7 +1406,7 @@ class GaussianModel:
                 velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
-                specular = torch.zeros((fused_point_cloud.shape[0], 3), device="cuda")
+                specular = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
                 specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device="cuda")
                 #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device="cuda")
                 #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
@@ -1463,7 +1507,7 @@ class GaussianModel:
                 velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                 rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                specular = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                 specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
                 #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                 #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1568,7 +1612,7 @@ class GaussianModel:
                             velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                            specular = torch.ones((fused_point_cloud.shape[0], 3), device=self.device)
+                            specular = torch.ones((fused_point_cloud.shape[0], 4), device=self.device)
                             specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
                             #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                             #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1658,7 +1702,7 @@ class GaussianModel:
             #timestamp = (2.3333333333333335 + 2.4) / 2
             #timestamp = 2.4
             #timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
-            #timestamp = (1.9666666666666666 + 1.9666666666666666) / 2
+            #timestamp = (1.9666666666666666 + 0.0) / 2
             timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
             #timestamp = (0.03333333333333333 + 0.03333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
@@ -1689,7 +1733,7 @@ class GaussianModel:
                     velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                    specular = torch.ones((fused_point_cloud.shape[0], 3), device=self.device)
+                    specular = torch.ones((fused_point_cloud.shape[0], 4), device=self.device)
                     specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
                     #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                     #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1839,9 +1883,9 @@ class GaussianModel:
                 l.append({'params': [self._velocity2], 'lr': training_args.rotation_lr / 50, "name": "velocity2"})
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
-                l.append({'params': [self._specular], 'lr': training_args.specular_lr, "name": "specular"})
+                l.append({'params': [self._specular], 'lr': training_args.feature_lr * 5, "name": "specular"})
                 l.append({'params': [self._albedo], 'lr': training_args.albedo_lr, "name": "albedo"})
-                l.append({'params': [self._specular2], 'lr': training_args.feature_lr * 5, "name": "specular2"})
+                l.append({'params': [self._specular2], 'lr': training_args.feature_lr, "name": "specular2"})
                 l.append({'params': [self._delta_normal], 'lr': training_args.delta_normal_lr, "name": "delta_normal"})
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
                 l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
@@ -1885,7 +1929,11 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
-        self.specular_feature_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr * 2,
+        self.specular_feature_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr * 5,
+                                                    lr_final=training_args.feature_lr,
+                                                    lr_delay_mult=training_args.position_lr_delay_mult,
+                                                    max_steps=training_args.position_lr_max_steps)
+        self.specular_feature_coeff_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr,
                                                     lr_final=training_args.feature_lr / 2,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
@@ -1920,8 +1968,12 @@ class GaussianModel:
             #     lr = self.scaling_t_scheduler_args(iteration)
             #     param_group["lr"] = lr
             #     #return lr
-            if param_group["name"] == "specular2":
+            if param_group["name"] == "specular":
                 lr = self.specular_feature_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "specular2":
+                lr = self.specular_feature_coeff_scheduler_args(iteration)
                 param_group["lr"] = lr
                 #return lr
             if param_group["name"] == "light_mlp":
@@ -2187,7 +2239,7 @@ class GaussianModel:
             min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
             #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
             ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-            # ENV_RADIUS = 1.6
+            #ENV_RADIUS = 1.6
             ENV_RADIUS = 8
             #ENV_RADIUS = 2
             xyz = self.get_xyz
@@ -2261,8 +2313,10 @@ class GaussianModel:
         new_albedo = self._albedo[selected_pts_mask].repeat(N,1)
         
         noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
-        new_specular2_before = self._specular2[selected_pts_mask] + noise_spec2
-        new_specular2_after = self._specular2[selected_pts_mask] - noise_spec2
+        # new_specular2_before = self._specular2[selected_pts_mask] + noise_spec2
+        # new_specular2_after = self._specular2[selected_pts_mask] - noise_spec2
+        new_specular2_before = self._specular2[selected_pts_mask]
+        new_specular2_after = self._specular2[selected_pts_mask]
         new_specular2 = torch.cat((new_specular2_before, new_specular2_after), dim=0)
         
         new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
@@ -2532,7 +2586,7 @@ class GaussianModel:
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False):
         #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
         ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-        # ENV_RADIUS = 1.6
+        #ENV_RADIUS = 1.6
         ENV_RADIUS = 8
         #ENV_RADIUS = 2
         xyz = self.get_xyz
@@ -2573,7 +2627,7 @@ class GaussianModel:
                 self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask)
                 self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask)
             #self.densify_and_split_time3(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
-            #self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
+            self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
 
         #prune_mask = (self.get_opacity < min_opacity).squeeze()
         if iteration < 20000:

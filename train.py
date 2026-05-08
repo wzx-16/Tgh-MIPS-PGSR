@@ -212,7 +212,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         elif iteration < 20000:
             densification_interval = 300
         elif iteration < 50000:
-            densification_interval = 500
+            densification_interval = 1000
         else:
             densification_interval = 1000
         for batch_data in training_dataloader:
@@ -656,7 +656,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
                 loss += 0.01 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
-                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 16, min=0.0).mean()
+                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 6, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 2, min=0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
@@ -680,7 +680,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 depth = render_pkg["depth"]
                 # print("min depth", depth.min())
                 # loss += torch.clip(0.5 - depth, min = 0.0).mean()
-                loss += 0.01 * gaussians._specular2[visibility_filter][..., gaussians.gsdim:].abs().mean()
+                #loss += 0.01 * gaussians._specular2[visibility_filter][..., gaussians.gsdim:].abs().mean()
+                local_feature_map = render_pkg["local_feature_map"]
+                roughness_map = render_pkg["rendered_rough"]
+                # if iteration > 6000:
+                #     loss += 0.01 * (local_feature_map.permute(1, 2, 0).abs() * roughness_map).mean()
 
                 if iteration > 0 and visibility_filter.sum() > 0:
                     scale = gaussians.get_scaling[visibility_filter]
@@ -771,7 +775,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
                         loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
-                        if iteration > 6000:
+                        if iteration > 12000:
+                            #pass
                             loss += 0.001 * local_gaussians.get_opacity[local_visibility_filter].mean()
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
@@ -960,7 +965,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if iteration % 3000 == 0:
                     #     gaussians.reset_opacity_large()
 
-                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points) and iteration > 15000:
+                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
                     local_gaussians.max_radii2D[local_visibility_filter] = torch.max(local_gaussians.max_radii2D[local_visibility_filter], local_radii[local_visibility_filter])
                     if batch_size == 1:
                         if local_viewspace_point_tensor.grad is not None and local_viewspace_point_tensor_abs.grad is not None:
@@ -970,12 +975,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                     if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
                         local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        if iteration >= 20000:
+                        if iteration >= 20000000:
                             local_densify_split_time = True
                         else:
                             local_densify_split_time = False
                         local_spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and local_densify_split_time) else None
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr)
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         if iteration <= 30000:
