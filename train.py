@@ -204,6 +204,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #     return total/area
     #print("test7")
     densification_interval = opt.densification_interval
+    local_feature_start_iter = 12000
     while iteration < opt.iterations + 1:
         if iteration <= 5000:
             densification_interval = 100
@@ -409,7 +410,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
                 dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
                 render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp)
+                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp, local_feature_start_iter=local_feature_start_iter)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -965,7 +966,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if iteration % 3000 == 0:
                     #     gaussians.reset_opacity_large()
 
-                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points) and iteration >= local_feature_start_iter:
                     local_gaussians.max_radii2D[local_visibility_filter] = torch.max(local_gaussians.max_radii2D[local_visibility_filter], local_radii[local_visibility_filter])
                     if batch_size == 1:
                         if local_viewspace_point_tensor.grad is not None and local_viewspace_point_tensor_abs.grad is not None:

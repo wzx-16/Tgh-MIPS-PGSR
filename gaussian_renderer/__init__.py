@@ -456,6 +456,7 @@ def render_3d_pgsr_anti(
     local_pc: GaussianModel = None,
     iteration = 0,
     timestamp = None,
+    local_feature_start_iter = 0,
 
 ):
     means3D = xyz
@@ -664,7 +665,7 @@ def render_3d_pgsr_anti(
     if iteration >= 20000:
         pass
         #local_feature = local_feature + (local_feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
-    if iteration < 12000:
+    if iteration < local_feature_start_iter:
         local_feature = torch.zeros_like(local_feature)
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature
