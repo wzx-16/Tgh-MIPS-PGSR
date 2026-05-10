@@ -372,6 +372,15 @@ class GaussianModel:
             nn.ReLU(inplace=True),
             nn.Linear(64, 3),
         ).cuda()
+        # self.light_mlp_2 = nn.Sequential(
+        #     nn.Linear(self.gsdim + 2, 32),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(32, 32),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(32, 32),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(32, 3),
+        # ).cuda()
         nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))   
 
         # self.light_mlp_2 = SpecLightMLP(
@@ -2250,9 +2259,9 @@ class GaussianModel:
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
             min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
-            ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+            ENV_CENTER = torch.tensor([0, 0, 3], device="cuda")
             #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-            ENV_RADIUS = 2.5
+            ENV_RADIUS = 2.1
             #ENV_RADIUS = 8
             #ENV_RADIUS = 2
             xyz = self.get_xyz
@@ -2597,9 +2606,9 @@ class GaussianModel:
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False):
-        ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+        ENV_CENTER = torch.tensor([0, 0, 3], device="cuda")
         #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-        ENV_RADIUS = 2.5
+        ENV_RADIUS = 2.1
         #ENV_RADIUS = 8
         #ENV_RADIUS = 2
         xyz = self.get_xyz

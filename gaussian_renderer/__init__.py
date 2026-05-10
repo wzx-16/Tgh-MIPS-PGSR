@@ -524,9 +524,9 @@ def render_3d_pgsr_anti(
     diffuse = pc.get_diffuse(dir_pp)
     rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
     rgb = torch.clamp_min(rgb + 0.5, 0.0)
-    ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+    ENV_CENTER = torch.tensor([0, 0, 3], device="cuda")
     #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-    ENV_RADIUS = 2.5
+    ENV_RADIUS = 2.1
     #ENV_RADIUS = 2
     #ENV_RADIUS = 8
     outside_mask = get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)
@@ -579,7 +579,7 @@ def render_3d_pgsr_anti(
     #     color = diffuse
     #     colors_precomp = color.squeeze() 
     #     shs = None
-    if iteration < 3000:
+    if iteration < 1000:
         color = rgb
         colors_precomp = color.squeeze() 
         shs = None
@@ -845,7 +845,7 @@ def render_3d_pgsr_anti(
         #select_mask = torch.logical_or(select_mask, rendered_local_alpha.reshape(-1,) > 0.02)
         select_index = select_mask.nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 3000 and len(select_index) > 0:
+    if iteration >= 1000 and len(select_index) > 0:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx
@@ -941,18 +941,27 @@ def render_3d_pgsr_anti(
             #     dim=-1,
             # )
             input_mlp = torch.cat(
-                [spec_feat, local_feature_selected, roughness_selected, cos_nr],
+                [spec_feat,local_feature_selected, roughness_selected, cos_nr],
                 dim=-1,
             )
             input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
-            mlp_output_base = pc.light_mlp(input_mlp_base).float()
+            #mlp_output_base = pc.light_mlp(input_mlp_base).float()
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
             #     dim=-1,
             # )
+            #mlp_output = pc.light_mlp_2(input_mlp).float()
+            # mlp_output, mlp_output_base = run_parallel_mlp_forward(
+            #     pc.light_mlp_2,
+            #     input_mlp,
+            #     pc.light_mlp,
+            #     input_mlp_base,
+            # )
             mlp_output = pc.light_mlp_2(input_mlp).float()
+            mlp_output_base = pc.light_mlp(input_mlp_base).float()
         else:
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
+            mlp_output_base = torch.zeros_like(mlp_output)
         spec_light = torch.exp(torch.clamp(mlp_output + mlp_output_base, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
@@ -1080,6 +1089,27 @@ def get_normal(scaling, rotation, camera_center, xyz):
 
 def get_rotation_matrix(rotation):
     return quaternion_to_matrix(rotation)
+
+def run_parallel_mlp_forward(mlp_a, input_a, mlp_b, input_b):
+    # Run independent MLP branches concurrently on CUDA to reduce specular shading latency.
+    if input_a.device.type != "cuda":
+        return mlp_a(input_a).float(), mlp_b(input_b).float()
+
+    current_stream = torch.cuda.current_stream(device=input_a.device)
+    stream_a = torch.cuda.Stream(device=input_a.device)
+    stream_b = torch.cuda.Stream(device=input_a.device)
+
+    stream_a.wait_stream(current_stream)
+    stream_b.wait_stream(current_stream)
+
+    with torch.cuda.stream(stream_a):
+        output_a = mlp_a(input_a).float()
+    with torch.cuda.stream(stream_b):
+        output_b = mlp_b(input_b).float()
+
+    current_stream.wait_stream(stream_a)
+    current_stream.wait_stream(stream_b)
+    return output_a, output_b
 
 def render_normal(intrinsic_matrix, extrinsic_matrix, depth, offset=None, normal=None, scale=1):
     # depth: (H, W), bg_color: (3), alpha: (H, W)
