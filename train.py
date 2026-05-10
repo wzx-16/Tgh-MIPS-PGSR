@@ -129,6 +129,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     
+    gaussians.scene_extent = scene.cameras_extent
+    local_gaussians.scene_extent = scene.cameras_extent
     #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
     
     if checkpoint:
@@ -204,9 +206,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #     return total/area
     #print("test7")
     densification_interval = opt.densification_interval
-    local_feature_start_iter = 12000
+    local_feature_start_iter = 3000
     while iteration < opt.iterations + 1:
-        if iteration <= 5000:
+        if iteration <= 20000:
             densification_interval = 100
         elif iteration < 10000:
             densification_interval = 200
@@ -443,8 +445,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 feature_map = render_pkg["feature_map"]
                 rendered_delta_normal = render_pkg["rendered_delta_normal"]
                 rendered_local_feature_map = render_pkg["local_feature_map"]
+                rendered_in = render_pkg["rendered_in"]
                 if iteration % 100 == 0 and feature_map is not None:
-                    torchvision.utils.save_image(feature_map[:3], "./test_feature{}/feature_map_{}_{}.png".format(id, viewpoint_cam.image_name, iteration))
+                    torchvision.utils.save_image(feature_map[:3], "./test_feature{}/feature_map_{}.png".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name))
                 if iteration % 100 == 0:
                     render_normal = render_pkg["rendered_normal"]
                     torchvision.utils.save_image((render_normal + 1) / 2, "render_normal.png")
@@ -452,6 +455,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image((rendered_delta_normal + 1) / 2, "rendered_delta_normal.png")
                 if iteration % 100 == 0 and rendered_local_feature_map is not None:
                     torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, "rendered_local_feature_map.png")
+                if iteration % 100 == 0 and rendered_in is not None:
+                    torchvision.utils.save_image(rendered_in, "rendered_in.png")
                 #loss_start = time.time()
                 # Loss
                 Ll1 = l1_loss(image, gt_image)
@@ -663,10 +668,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.4, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
-                # loss += 1 * torch.clip(gaussians.get_t - 0.0, min = 0.0).mean()
-                # loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
-                loss += 1 * torch.clip(gaussians.get_t - 0.6666666666666666, min = 0.0).mean()
-                loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - 0.0, min = 0.0).mean()
+                loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
+                # loss += 1 * torch.clip(gaussians.get_t - 0.6666666666666666, min = 0.0).mean()
+                # loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 0.03333333333333333, min = 0.0).mean()
                 #loss += 1 * torch.clip(0.03333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(2.4 - gaussians.get_t, min = 0.0).mean()
@@ -766,7 +771,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
                     #delta_normal_grad = get_img_grad_weight_avg(rendered_delta_normal)
                     #loss += 0.01 * delta_normal_grad.mean()
-                    if (iteration > opt.densify_from_iter and iteration <= 35000):
+                    if (iteration > opt.densify_from_iter and iteration <= 20000):
                         #pass
                         # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
                         # ENV_RADIUS = 8
@@ -776,9 +781,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
                         loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
-                        if iteration > 12000:
-                            #pass
-                            loss += 0.001 * local_gaussians.get_opacity[local_visibility_filter].mean()
+                    if iteration > 10000:
+                        # pass
+                        loss += 0.01 * (local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()).mean()
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
@@ -802,7 +807,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # torch.cuda.synchronize()
                 # print(f"loss compute time: {loss_end - loss_start:.6f} seconds")
                 #scene.tgh.update_from_gaussians(gaussians, opt)
-
+            
             if batch_size > 1:
                 visibility_count = torch.stack(batch_visibility_filter,1).sum(1)
                 visibility_filter = visibility_count > 0
@@ -887,6 +892,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                             
                     progress_bar.set_postfix(postfix)
                     progress_bar.update(10)
+
+                if iteration >= local_feature_start_iter and iteration % 200 == 0:
+                    local_opacity = local_gaussians.get_opacity.detach().squeeze()
+                    if local_opacity.numel() > 0:
+                        opacity_hist = torch.histc(local_opacity, bins=10, min=0.0, max=1.0)
+                        opacity_hist_str = ", ".join([str(int(v.item())) for v in opacity_hist])
+                        print(
+                            "[ITER {}] local opacity stats: mean={:.6f}, min={:.6f}, max={:.6f}, hist10=[{}]".format(
+                                iteration,
+                                local_opacity.mean().item(),
+                                local_opacity.min().item(),
+                                local_opacity.max().item(),
+                                opacity_hist_str,
+                            )
+                        )
+
                 if iteration == opt.iterations:
                     progress_bar.close()
 
@@ -974,18 +995,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     else:
                         local_gaussians.add_densification_stats_grad(batch_local_viewspace_point_grad, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None)
 
-                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
+                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % (densification_interval) == 0):
                         local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         if iteration >= 20000000:
                             local_densify_split_time = True
                         else:
                             local_densify_split_time = False
                         local_spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and local_densify_split_time) else None
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr)
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=True)
 
-                    if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        if iteration <= 30000:
-                            local_gaussians.reset_opacity_high()
+                    # if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    #     #pass
+                    #     if iteration <= 20000:
+                    #         local_gaussians.reset_opacity_high()
                 # if iteration == 500000:
                 #     tgh.reset_diffuse()
                 #     gaussians.reset_diffuse()

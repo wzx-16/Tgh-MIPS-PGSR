@@ -258,6 +258,8 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
         local_gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
         scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, shuffle=False, render_only=True, eid=id)
+        gaussians.scene_extent = scene.cameras_extent
+        local_gaussians.scene_extent = scene.cameras_extent
         if not getattr(scene, "local_gaussians_loaded", False):
             initialize_local_gaussian_model(gaussians, local_gaussians)
         else:

@@ -524,11 +524,11 @@ def render_3d_pgsr_anti(
     diffuse = pc.get_diffuse(dir_pp)
     rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
     rgb = torch.clamp_min(rgb + 0.5, 0.0)
-    #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-    ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-    #ENV_RADIUS = 1.6
+    ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+    #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+    ENV_RADIUS = 2.5
     #ENV_RADIUS = 2
-    ENV_RADIUS = 8
+    #ENV_RADIUS = 8
     outside_mask = get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)
     gs_in = torch.ones_like(opacity)
     gs_in[outside_mask] = 0.0
@@ -579,7 +579,7 @@ def render_3d_pgsr_anti(
     #     color = diffuse
     #     colors_precomp = color.squeeze() 
     #     shs = None
-    if iteration < 6000:
+    if iteration < 3000:
         color = rgb
         colors_precomp = color.squeeze() 
         shs = None
@@ -845,7 +845,7 @@ def render_3d_pgsr_anti(
         #select_mask = torch.logical_or(select_mask, rendered_local_alpha.reshape(-1,) > 0.02)
         select_index = select_mask.nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 6000 and len(select_index) > 0:
+    if iteration >= 3000 and len(select_index) > 0:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx
@@ -936,10 +936,16 @@ def render_3d_pgsr_anti(
         # )
         if isinstance(pc.light_mlp_2, torch.nn.Sequential):
             # Backward compatibility for older checkpoints saved with the previous Sequential layout.
+            # input_mlp = torch.cat(
+            #     [spec_feat, sph_outer_feature, local_feature_selected, roughness_selected, cos_nr],
+            #     dim=-1,
+            # )
             input_mlp = torch.cat(
-                [spec_feat, sph_outer_feature, local_feature_selected, roughness_selected, cos_nr],
+                [spec_feat, local_feature_selected, roughness_selected, cos_nr],
                 dim=-1,
             )
+            input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
+            mlp_output_base = pc.light_mlp(input_mlp_base).float()
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
             #     dim=-1,
@@ -947,7 +953,7 @@ def render_3d_pgsr_anti(
             mlp_output = pc.light_mlp_2(input_mlp).float()
         else:
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
-        spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
+        spec_light = torch.exp(torch.clamp(mlp_output + mlp_output_base, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
         spec_rgb.reshape(-1, 3)[select_index] = spec_light

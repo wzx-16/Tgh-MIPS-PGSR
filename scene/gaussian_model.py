@@ -177,7 +177,7 @@ class GaussianModel:
         self.rotation_activation = torch.nn.functional.normalize
 
 
-    def __init__(self, sh_degree : int, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, force_sh_3d: bool = False, sh_degree_t : int = 0, current_timestamp : float = 0.0, device: str = "cuda"):
+    def __init__(self, sh_degree : int, gaussian_dim : int = 3, time_duration: list = [-0.5, 0.5], rot_4d: bool = False, force_sh_3d: bool = False, sh_degree_t : int = 0, current_timestamp : float = 0.0, scene_extent: float = 0.0, device: str = "cuda"):
         self.active_sh_degree = 0
         self.max_sh_degree = sh_degree  
         self._xyz = torch.empty(0, device=device)
@@ -194,6 +194,8 @@ class GaussianModel:
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+
+        self.scene_extent = scene_extent
         
         self.gaussian_dim = gaussian_dim
         self._t = torch.empty(0, device=device)
@@ -350,16 +352,27 @@ class GaussianModel:
         # ).cuda()
         # nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
 
+        # self.light_mlp_2 = nn.Sequential(
+        #     nn.Linear(self.gsdim + self.gsdim * self.sph_dim + self.sph_dim + 2, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 128),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(128, 3),
+        # ).cuda()
+        # nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))        
+
         self.light_mlp_2 = nn.Sequential(
-            nn.Linear(self.gsdim + self.gsdim * self.sph_dim + self.sph_dim + 2, 128),
+            nn.Linear(self.gsdim + self.sph_dim + 2, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(128, 128),
+            nn.Linear(64, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(128, 128),
+            nn.Linear(64, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(128, 3),
+            nn.Linear(64, 3),
         ).cuda()
-        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))        
+        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))   
 
         # self.light_mlp_2 = SpecLightMLP(
         #     base_dim=self.gsdim + self.sph_dim + 2,
@@ -1236,7 +1249,7 @@ class GaussianModel:
         
     @property
     def get_scaling(self):
-        return self.scaling_activation(self._scaling) + 0.001
+        return torch.clamp(self.scaling_activation(self._scaling) + 0.001, max=0.1 * self.scene_extent)
     
     @property
     def get_scaling_t(self):
@@ -1552,8 +1565,8 @@ class GaussianModel:
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
-                if ii < 81 and ii >= 19:
-                #if ii < 60 and ii >= 0:
+                #if ii < 81 and ii >= 19:
+                if ii < 60 and ii >= 0:
                 #if ii == 71:
                 #if ii < 10:
             
@@ -1702,8 +1715,8 @@ class GaussianModel:
             #timestamp = (2.3333333333333335 + 2.4) / 2
             #timestamp = 2.4
             #timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
-            #timestamp = (1.9666666666666666 + 0.0) / 2
-            timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
+            timestamp = (1.9666666666666666 + 0.0) / 2
+            #timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
             #timestamp = (0.03333333333333333 + 0.03333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
             # if time_duration is not None:
@@ -1722,8 +1735,8 @@ class GaussianModel:
                 # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
                 #dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
-                #dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
-                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
+                dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
+                #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
                 # dist_t = torch.zeros_like(fused_times, device=self.device)
                 # scales_t = torch.log(torch.sqrt(dist_t))
@@ -2237,10 +2250,10 @@ class GaussianModel:
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
             min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
-            #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-            ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-            #ENV_RADIUS = 1.6
-            ENV_RADIUS = 8
+            ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+            #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+            ENV_RADIUS = 2.5
+            #ENV_RADIUS = 8
             #ENV_RADIUS = 2
             xyz = self.get_xyz
             outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
@@ -2447,7 +2460,7 @@ class GaussianModel:
         padded_outside_mask[:outside_mask.shape[0]] = outside_mask
 
         #selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(padded_grad >= grad_threshold, True, False), padded_inside_mask), torch.logical_and(torch.where(padded_grad >= 0.0004, True, False), padded_outside_mask))
+        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(padded_grad >= grad_threshold, True, False), padded_inside_mask), torch.logical_and(torch.where(padded_grad >= grad_threshold, True, False), padded_outside_mask))
 
         spatial_spread_mask = torch.max(self.get_scaling, dim=1).values > self.percent_dense * scene_extent
         # if self.gaussian_dim == 4:
@@ -2536,7 +2549,7 @@ class GaussianModel:
     def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask):
         # Extract points that satisfy the gradient condition
         #selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
-        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), inside_mask), torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= 0.0002, True, False), outside_mask))
+        selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), inside_mask), torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), outside_mask))
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
         # print(f"num_to_densify_pos: {torch.where(grads >= grad_threshold, True, False).sum()}, num_to_clone_pos: {selected_pts_mask.sum()}")
@@ -2583,11 +2596,11 @@ class GaussianModel:
 
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False):
-        #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-        ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-        #ENV_RADIUS = 1.6
-        ENV_RADIUS = 8
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False):
+        ENV_CENTER = torch.tensor([0, 0, 2.5], device="cuda")
+        #ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+        ENV_RADIUS = 2.5
+        #ENV_RADIUS = 8
         #ENV_RADIUS = 2
         xyz = self.get_xyz
         outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
@@ -2631,17 +2644,31 @@ class GaussianModel:
 
         #prune_mask = (self.get_opacity < min_opacity).squeeze()
         if iteration < 20000:
-            n_init_points = self.get_xyz.shape[0]
-            padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
-            padded_inside_mask[:gs_in.shape[0]] = gs_in
-            
-            padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
-            padded_outside_mask[:outside_mask.shape[0]] = outside_mask
-            prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
-            if max_screen_size:
-                big_points_vs = self.max_radii2D > max_screen_size
-                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-                prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            if not disable_prune:
+                n_init_points = self.get_xyz.shape[0]
+                padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+                padded_inside_mask[:gs_in.shape[0]] = gs_in
+                
+                padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+                padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+                prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
+                if max_screen_size:
+                    big_points_vs = self.max_radii2D > max_screen_size
+                    big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                    prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            else:
+                #prune_mask = torch.zeros_like(self.get_opacity.squeeze(), dtype=torch.bool)
+                n_init_points = self.get_xyz.shape[0]
+                padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+                padded_inside_mask[:gs_in.shape[0]] = gs_in
+                
+                padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+                padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+                prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
+                #if max_screen_size:
+                    #big_points_vs = self.max_radii2D > max_screen_size
+                    #big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                    #prune_mask = torch.logical_or(prune_mask, big_points_vs)
             self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
