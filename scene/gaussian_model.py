@@ -350,6 +350,15 @@ class GaussianModel:
         # ).cuda()
         # nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
 
+        # self.light_mlp_2 = nn.Sequential(
+        #     nn.Linear(self.gsdim + 2, 64),
+        #     nn.ReLU(inplace=True),
+        #     # nn.Linear(64, 64),
+        #     # nn.ReLU(inplace=True),
+        #     nn.Linear(64, 64),
+        #     nn.ReLU(inplace=True),
+        #     nn.Linear(64, 3),
+        # ).cuda()
         self.light_mlp_2 = nn.Sequential(
             nn.Linear(self.gsdim + self.sph_dim + 2, 64),
             nn.ReLU(inplace=True),
@@ -2309,10 +2318,14 @@ class GaussianModel:
         new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
         new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
         new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
-        new_specular = self._specular[selected_pts_mask].repeat(N,1)
+        # new_specular = self._specular[selected_pts_mask].repeat(N,1)
         new_albedo = self._albedo[selected_pts_mask].repeat(N,1)
         
-        noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
+        #noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
+        noise_spec = torch.randn_like(self._specular[selected_pts_mask]) * 0.1
+        new_specular_before = self._specular[selected_pts_mask] + noise_spec
+        new_specular_after = self._specular[selected_pts_mask] - noise_spec
+        new_specular = torch.cat((new_specular_before, new_specular_after), dim=0)
         # new_specular2_before = self._specular2[selected_pts_mask] + noise_spec2
         # new_specular2_after = self._specular2[selected_pts_mask] - noise_spec2
         new_specular2_before = self._specular2[selected_pts_mask]

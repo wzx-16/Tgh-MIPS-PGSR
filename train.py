@@ -206,7 +206,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     densification_interval = opt.densification_interval
     local_feature_start_iter = 9000
     while iteration < opt.iterations + 1:
-        if iteration <= 20000:
+        if iteration <= 5000:
             densification_interval = 100
         elif iteration < 10000:
             densification_interval = 200
@@ -493,12 +493,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     avg_diff_render = torch.mean(torch.abs(render_depth - render_depth.median()))
                     render_depth_norm = (render_depth - render_depth.median()) / avg_diff_render
                     depth_grad = (1 - get_img_grad_weight_grey(predicted_depth)).detach()
-                    # if iteration < 500:
-                    #     pass
+                    if iteration > 1500:
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
                     # elif iteration < 60000:
-                    loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
+                        loss += 0.01 * (torch.abs((depth_norm + render_depth_norm))).mean()
                     # elif iteration < 15000:
                     #     loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     # elif iteration < 30000:
@@ -506,9 +505,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration % 100 == 1:
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
-                        torchvision.utils.save_image(render_depth_image, "render_depth.png")
+                        #torchvision.utils.save_image(render_depth_image, "render_depth.png")
                         torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
 
+                if iteration % 100 == 0:
+                    render_depth = render_pkg["depth"]
+                    render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
+                    torchvision.utils.save_image(render_depth_image, "render_depth.png")
                 if iteration < 10000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
@@ -551,7 +554,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     elif iteration < 1500:
                         loss += 0.02 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     else:
-                        loss += 0.1 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     # elif iteration < 15000:
                     #     loss += 0.02 * (depth_grad * (1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     #     #loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
@@ -766,7 +769,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
                     #delta_normal_grad = get_img_grad_weight_avg(rendered_delta_normal)
                     #loss += 0.01 * delta_normal_grad.mean()
-                    if (iteration > opt.densify_from_iter and iteration <= 35000):
+                    if (iteration > opt.densify_from_iter and iteration <= 25000):
                         #pass
                         # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
                         # ENV_RADIUS = 8

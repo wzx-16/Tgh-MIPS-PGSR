@@ -71,6 +71,27 @@ def get_refl_dir(HWK, R, T, normal_map, pixel_camera): #RT W2C
     #rays_d = rays_d.clamp(-1, 1) # avoid numerical error when arccos
     return rays_f, rays_d
 
+def run_parallel_mlp_forward(mlp_a, input_a, mlp_b, input_b):
+    # Run independent MLP branches concurrently on CUDA to reduce specular shading latency.
+    if input_a.device.type != "cuda":
+        return mlp_a(input_a).float(), mlp_b(input_b).float()
+
+    current_stream = torch.cuda.current_stream(device=input_a.device)
+    stream_a = torch.cuda.Stream(device=input_a.device)
+    stream_b = torch.cuda.Stream(device=input_a.device)
+
+    stream_a.wait_stream(current_stream)
+    stream_b.wait_stream(current_stream)
+
+    with torch.cuda.stream(stream_a):
+        output_a = mlp_a(input_a).float()
+    with torch.cuda.stream(stream_b):
+        output_b = mlp_b(input_b).float()
+
+    current_stream.wait_stream(stream_a)
+    current_stream.wait_stream(stream_b)
+    return output_a, output_b
+
 def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None):
     """
     Render the scene. 
@@ -424,7 +445,7 @@ def render_3d_pgsr(
 
     # # MRF-based Normal Refinement
     # if VERSION == 'd2nt_v3':
-    #     est_normal = MRF_optim(depth[None], est_normal)
+    #     est_normal = MRF_optim(depth[Nonde], est_normal)
 
     # depth_normal = est_normal[0]
     # # print(depth_normal.mean())
@@ -944,15 +965,26 @@ def render_3d_pgsr_anti(
                 [spec_feat, local_feature_selected, roughness_selected, cos_nr],
                 dim=-1,
             )
+            # input_mlp = torch.cat(
+            #     [local_feature_selected, roughness_selected, cos_nr],
+            #     dim=-1,
+            # )
             input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
             #     dim=-1,
             # )
+            # mlp_output, mlp_output_base = run_parallel_mlp_forward(
+            #     pc.light_mlp_2,
+            #     input_mlp,
+            #     pc.light_mlp,
+            #     input_mlp_base,
+            # )
             mlp_output = pc.light_mlp_2(input_mlp).float()
             mlp_output_base = pc.light_mlp(input_mlp_base).float()
         else:
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
+            mlp_output_base = torch.zeros_like(mlp_output)
         spec_light = torch.exp(torch.clamp(mlp_output + mlp_output_base, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
