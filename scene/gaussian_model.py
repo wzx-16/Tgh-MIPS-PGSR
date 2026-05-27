@@ -1561,7 +1561,7 @@ class GaussianModel:
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
-                if ii < 81 and ii >= 49:
+                if ii < 81 and ii >= 19:
                 #if ii < 60 and ii >= 0:
                 #if ii == 71:
                 #if ii < 10:
@@ -1712,7 +1712,7 @@ class GaussianModel:
             #timestamp = 2.4
             #timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
             #timestamp = (1.9666666666666666 + 0.0) / 2
-            timestamp = (2.6333333333333333 + 1.6666666666666667) / 2
+            timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
             #timestamp = (0.03333333333333333 + 0.03333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
             # if time_duration is not None:
@@ -1732,7 +1732,7 @@ class GaussianModel:
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
                 #dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
-                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 1.6666666666666667) / 2
+                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
                 # dist_t = torch.zeros_like(fused_times, device=self.device)
                 # scales_t = torch.log(torch.sqrt(dist_t))

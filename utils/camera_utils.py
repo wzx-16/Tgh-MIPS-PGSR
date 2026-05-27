@@ -70,25 +70,28 @@ def loadCam(args, id, cam_info, resolution_scale):
         # loaded_mask = torch.from_numpy(np.array(loaded_mask_PIL)) / 255.0
         #loaded_mask = loaded_mask.permute(2, 0, 1)
     
-    if cam_info.depth is not None:
-        depth = PILtoTorch(cam_info.depth, resolution) * 255 / 10000
-    else:
-        depth = None
+    # if cam_info.depth is not None:
+    #     depth = PILtoTorch(cam_info.depth, resolution) * 255 / 10000
+    # else:
+    #     depth = None
 
-    normal_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_normal", cam_info.image_name + ".npy"))
-    # print(normal_path)
-    if os.path.exists(normal_path):
-        normal = np.load(normal_path)
-    else:
-        normal = None
-        print(normal_path)
-    #normal = None
+    # normal_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_normal", cam_info.image_name + ".npy"))
+    # # print(normal_path)
+    # if os.path.exists(normal_path):
+    #     normal = np.load(normal_path)
+    # else:
+    #     normal = None
+    #     print(normal_path)
+    # #normal = None
 
-    depth_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_depth", cam_info.image_name + ".npy"))
-    if os.path.exists(depth_path):
-        depth = np.load(depth_path)
-    else:
-        depth = None
+    # depth_path = "/" + os.path.join(os.path.join(*cam_info.image_path.split("/")[0:-2]), os.path.join("sgt_depth", cam_info.image_name + ".npy"))
+    # if os.path.exists(depth_path):
+    #     depth = np.load(depth_path)
+    # else:
+    #     depth = None
+
+    normal = None
+    depth = None
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
