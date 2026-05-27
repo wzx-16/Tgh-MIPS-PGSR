@@ -986,6 +986,7 @@ def render_3d_pgsr_anti(
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
             mlp_output_base = torch.zeros_like(mlp_output)
         spec_light = torch.exp(torch.clamp(mlp_output + mlp_output_base, max=5.0))
+        #spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
         spec_rgb.reshape(-1, 3)[select_index] = spec_light

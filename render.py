@@ -59,7 +59,7 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
     if isinstance(global_model.max_radii2D, torch.Tensor):
         local_model.max_radii2D = global_model.max_radii2D.detach().clone()
 
-def render_set(model_path, name, iteration, views, gaussians, local_gaussians, tgh, pipeline, background, id):
+def render_set(model_path, name, iteration, views, gaussians, local_gaussians, tgh, pipeline, background, skip_save, id):
     render_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "renders")
     gts_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "gt")
     predicted_depth_path = os.path.join(model_path, f"{name}_{id}", "ours_{}".format(iteration), "predicted_depth")
@@ -228,6 +228,8 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         print("image size")
         print(depth_normal.size(), gt.size())
         torchvision.utils.save_image(rendering, os.path.join(render_path, '{0:05d}'.format(idx) + ".png"))
+        if skip_save is not None and skip_save:
+            continue
         #cv2.imwrite("./debug_render_{}.jpg".format(viewpoint_cam.image_name), ((rendering.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8)))
         torchvision.utils.save_image(gt, os.path.join(gts_path, '{0:05d}'.format(idx) + ".png"))
         torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, '{0:05d}'.format(idx) + ".png"))
@@ -252,7 +254,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     #print(psnr_avg.shape)
     print("Average PSNR: {:.2f}".format(psnr_avg.mean()))
 
-def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, id : int):
+def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParams, skip_train : bool, skip_test : bool, skip_save : bool, id : int):
     with torch.no_grad():
         tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
@@ -275,10 +277,10 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         if not skip_train:
-               render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, local_gaussians, tgh, pipeline, background, id)
+               render_set(dataset.model_path, "train", scene.loaded_iter, scene.getTrainCameras(), gaussians, local_gaussians, tgh, pipeline, background, skip_save, id)
 
         if not skip_test:
-               render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, local_gaussians, tgh, pipeline, background, id)
+               render_set(dataset.model_path, "test", scene.loaded_iter, scene.getTestCameras(), gaussians, local_gaussians, tgh, pipeline, background, skip_save, id)
 
 if __name__ == "__main__":
     # Set up command line argument parser
@@ -289,6 +291,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--skip_save", action="store_true")
     args = get_combined_args(parser)
     print("Rendering " + args.model_path)
 
@@ -296,4 +299,4 @@ if __name__ == "__main__":
     safe_state(args.quiet)
     id = args.loaded_pth.split("tgh")[-1][0] if args.loaded_pth else 0
     print("Rendering id:", id)
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, id)
+    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_save, id)
