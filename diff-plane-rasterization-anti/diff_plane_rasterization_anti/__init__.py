@@ -78,6 +78,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.tanfovx,
             raster_settings.tanfovy,
             raster_settings.kernel_size,
+            raster_settings.cx,
+            raster_settings.cy,
             raster_settings.image_height,
             raster_settings.image_width,
             sh,
@@ -130,6 +132,8 @@ class _RasterizeGaussians(torch.autograd.Function):
                 raster_settings.tanfovx, 
                 raster_settings.tanfovy, 
                 raster_settings.kernel_size,
+                raster_settings.cx,
+                raster_settings.cy,
                 grad_out_color, 
                 grad_out_all_map,
                 grad_out_plane_depth,
@@ -178,6 +182,8 @@ class GaussianRasterizationSettings(NamedTuple):
     tanfovx : float
     tanfovy : float
     kernel_size : float
+    cx : float
+    cy : float
     bg : torch.Tensor
     scale_modifier : float
     viewmatrix : torch.Tensor

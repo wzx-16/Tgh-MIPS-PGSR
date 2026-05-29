@@ -2322,7 +2322,7 @@ class GaussianModel:
         new_albedo = self._albedo[selected_pts_mask].repeat(N,1)
         
         #noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
-        noise_spec = torch.randn_like(self._specular[selected_pts_mask]) * 0.1
+        noise_spec = torch.randn_like(self._specular[selected_pts_mask]) * 0.01
         new_specular_before = self._specular[selected_pts_mask] + noise_spec
         new_specular_after = self._specular[selected_pts_mask] - noise_spec
         new_specular = torch.cat((new_specular_before, new_specular_after), dim=0)
@@ -2546,7 +2546,7 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask):
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask, low_opa=True):
         # Extract points that satisfy the gradient condition
         #selected_pts_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
         selected_pts_mask = torch.logical_or(torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), inside_mask), torch.logical_and(torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False), outside_mask))
@@ -2558,8 +2558,9 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
         new_opacities = self._opacity[selected_pts_mask]
-        new_opacities = self.inverse_opacity_activation(1 - (1 - self.opacity_activation(new_opacities)) ** 0.5)
-        self._opacity[selected_pts_mask].data = new_opacities
+        if low_opa:
+            new_opacities = self.inverse_opacity_activation(1 - (1 - self.opacity_activation(new_opacities)) ** 0.5)
+            self._opacity[selected_pts_mask].data = new_opacities
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_t = None
@@ -2637,7 +2638,10 @@ class GaussianModel:
             else:
                 grads_t = None
             if iteration <= 30000:
-                self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask)
+                if iteration < 9000:
+                    self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask)
+                else:
+                    self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask, low_opa=False)
                 self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask)
             #self.densify_and_split_time3(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
             self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)

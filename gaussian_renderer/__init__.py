@@ -303,6 +303,8 @@ def render_3d_pgsr(
     FoVy = viewpoint_camera.FoVy
     tanfovx = math.tan(FoVx * 0.5)
     tanfovy = math.tan(FoVy * 0.5)
+    principal_x = float(viewpoint_camera.cx) if getattr(viewpoint_camera, "cx", -1) >= 0 else float(viewpoint_camera.image_width) * 0.5
+    principal_y = float(viewpoint_camera.cy) if getattr(viewpoint_camera, "cy", -1) >= 0 else float(viewpoint_camera.image_height) * 0.5
     # world_view_transform = extr.transpose(1, 0).cuda()
     # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
     # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
@@ -313,7 +315,10 @@ def render_3d_pgsr(
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
             tanfovy=tanfovy,
+            kernel_size=0.3,
             bg=bg_color,
+            cx=principal_x,
+            cy=principal_y,
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform,
             projmatrix=viewpoint_camera.full_proj_transform,
@@ -505,6 +510,8 @@ def render_3d_pgsr_anti(
     FoVy = viewpoint_camera.FoVy
     tanfovx = math.tan(FoVx * 0.5)
     tanfovy = math.tan(FoVy * 0.5)
+    principal_x = float(viewpoint_camera.cx) if getattr(viewpoint_camera, "cx", -1) >= 0 else float(viewpoint_camera.image_width) * 0.5
+    principal_y = float(viewpoint_camera.cy) if getattr(viewpoint_camera, "cy", -1) >= 0 else float(viewpoint_camera.image_height) * 0.5
     # world_view_transform = extr.transpose(1, 0).cuda()
     # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
     # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
@@ -517,6 +524,8 @@ def render_3d_pgsr_anti(
             tanfovy=tanfovy,
             kernel_size=0.3,
             bg=bg_color,
+            cx=principal_x,
+            cy=principal_y,
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform,
             projmatrix=viewpoint_camera.full_proj_transform,
@@ -600,7 +609,7 @@ def render_3d_pgsr_anti(
     #     color = diffuse
     #     colors_precomp = color.squeeze() 
     #     shs = None
-    if iteration < 3000:
+    if iteration < 9000:
         color = rgb
         colors_precomp = color.squeeze() 
         shs = None
@@ -681,7 +690,7 @@ def render_3d_pgsr_anti(
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
     local_feature_coeff = local_pc.get_specular2[:, pc.gsdim:] * 2
-    if iteration >= 25000:
+    if iteration >= 30000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     if iteration >= 20000:
         pass
@@ -725,6 +734,8 @@ def render_3d_pgsr_anti(
             tanfovy=tanfovy,
             kernel_size=0.3,
             bg=torch.zeros_like(bg_color),
+            cx=principal_x,
+            cy=principal_y,
             scale_modifier=scaling_modifier,
             viewmatrix=viewpoint_camera.world_view_transform,
             projmatrix=viewpoint_camera.full_proj_transform,
@@ -866,7 +877,7 @@ def render_3d_pgsr_anti(
         #select_mask = torch.logical_or(select_mask, rendered_local_alpha.reshape(-1,) > 0.02)
         select_index = select_mask.nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 3000 and len(select_index) > 0:
+    if iteration >= 9000 and len(select_index) > 0:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx
@@ -1015,7 +1026,7 @@ def render_3d_pgsr_anti(
         #rendered_image = rendered_image * (rendered_out.permute(2, 0, 1)) + linear2srgb(rendered_albedo * (rendered_in.permute(2, 0, 1)) + spec_rgb)
     else:
         #rendered_image = rendered_image
-        rendered_image = rendered_image
+        rendered_image = linear2srgb(rendered_image)
     # print(rendered_distance.min(), rendered_distance.mean(), rendered_distance.max(), 'ddd')
     
     return_dict =  {"render": rendered_image,
