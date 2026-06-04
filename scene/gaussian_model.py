@@ -1328,24 +1328,37 @@ class GaussianModel:
 
     @property
     def get_specular2_temporal_variation(self):
-        if not (self.gaussian_dim == 4 and self.rot_4d and self._specular2.numel() > 0):
+        if not (self.gaussian_dim == 4 and self.rot_4d):
             return torch.zeros((self.get_xyz.shape[0], 1), device=self.device)
 
-        if self._specular2.grad is None:
-            return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
+        num_points = self.get_xyz.shape[0]
+        variation = torch.zeros((num_points, 1), device=self.device)
 
-        # feature_coeff_grad = self._specular2.grad[:, self.gsdim:]
-        # if feature_coeff_grad.shape[1] == 0:
-        #     return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
-        feature_grad = self._specular2.grad
+        static_grad_metric = None
+        coeff_grad_metric = None
 
-        # n_freq = feature_coeff_grad.shape[1] // self.gsdim
-        # if n_freq == 0:
-        #     return torch.zeros((self._specular2.shape[0], 1), device=self._specular2.device)
+        # Static BRDF features are stored in _specular, while temporal coefficients are in _specular2.
+        if self._specular.numel() > 0 and self._specular.grad is not None:
+            static_grad_metric = self._specular.grad.abs().mean(dim=1, keepdim=True)
+            if static_grad_metric.shape[0] == num_points:
+                variation += static_grad_metric.to(variation.device)
+            else:
+                static_grad_metric = None
 
-        # feature_coeff_grad = feature_coeff_grad[:, : self.gsdim * n_freq].reshape(-1, self.gsdim, n_freq)
-        # variation = feature_coeff_grad.abs().mean(dim=(1, 2), keepdim=False).unsqueeze(-1)
-        variation = feature_grad.abs().mean(dim=1, keepdim=True)
+        if self._specular2.numel() > 0 and self._specular2.grad is not None:
+            feature_coeff_grad = self._specular2.grad[:, self.gsdim:]
+            if feature_coeff_grad.shape[1] == 0:
+                feature_coeff_grad = self._specular2.grad
+            if feature_coeff_grad.shape[1] > 0:
+                coeff_grad_metric = feature_coeff_grad.abs().mean(dim=1, keepdim=True)
+                if coeff_grad_metric.shape[0] == num_points:
+                    variation += coeff_grad_metric.to(variation.device)
+                else:
+                    coeff_grad_metric = None
+
+        if static_grad_metric is not None and coeff_grad_metric is not None:
+            variation = 0.5 * variation
+
         return variation
     
     @property
@@ -2323,8 +2336,8 @@ class GaussianModel:
         
         #noise_spec2 = torch.randn_like(self._specular2[selected_pts_mask]) * 0.1
         noise_spec = torch.randn_like(self._specular[selected_pts_mask]) * 0.01
-        new_specular_before = self._specular[selected_pts_mask] + noise_spec
-        new_specular_after = self._specular[selected_pts_mask] - noise_spec
+        new_specular_before = self._specular[selected_pts_mask]
+        new_specular_after = self._specular[selected_pts_mask]
         new_specular = torch.cat((new_specular_before, new_specular_after), dim=0)
         # new_specular2_before = self._specular2[selected_pts_mask] + noise_spec2
         # new_specular2_after = self._specular2[selected_pts_mask] - noise_spec2

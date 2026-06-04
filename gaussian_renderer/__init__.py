@@ -512,6 +512,8 @@ def render_3d_pgsr_anti(
     tanfovy = math.tan(FoVy * 0.5)
     principal_x = float(viewpoint_camera.cx) if getattr(viewpoint_camera, "cx", -1) >= 0 else float(viewpoint_camera.image_width) * 0.5
     principal_y = float(viewpoint_camera.cy) if getattr(viewpoint_camera, "cy", -1) >= 0 else float(viewpoint_camera.image_height) * 0.5
+    # principal_x = float(viewpoint_camera.image_width) * 0.5
+    # principal_y = float(viewpoint_camera.image_height) * 0.5
     # world_view_transform = extr.transpose(1, 0).cuda()
     # projection_matrix = getProjectionMatrix(znear = 0.1, zfar = 100, fovX = FoVx, fovY = FoVy, K = intr, img_w = img_w, img_h = img_h).transpose(0, 1).cuda()
     # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)

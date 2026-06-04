@@ -62,6 +62,11 @@ def entropy_loss(alpha):
     loss = torch.mean(loss)
     return loss
 
+def safe_mean(x):
+    if x.numel() == 0:
+        return x.new_tensor(0.0)
+    return x.mean()
+
 def _clone_tensor_attr(src_tensor):
     cloned = src_tensor.detach().clone()
     if isinstance(src_tensor, nn.Parameter):
@@ -553,6 +558,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         pass
                     elif iteration < 1500:
                         loss += 0.02 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
+                    elif iteration < 5000:
+                        loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     else:
                         loss += 0.05 * ((1 - (render_normal_norm * normal_norm).sum(dim=0))).mean()
                     # elif iteration < 15000:
@@ -668,17 +675,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
                 # loss += 1 * torch.clip(gaussians.get_t - 0.0, min = 0.0).mean()
                 # loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
-                # loss += 1 * torch.clip(gaussians.get_t - 0.6666666666666666, min = 0.0).mean()
-                # loss += 1 * torch.clip(2.6333333333333333 - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(0.6666666666666666 - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - 2.6333333333333333, min = 0.0).mean()
                 # Smooth temporal barrier: keep gradients near the time limits.
                 # time_lower, time_upper = 0.6666666666666666, 2.6333333333333333
-                time_lower, time_upper = 0, 3
-                time_soft_beta = 10.0  # larger beta makes the boundary closer to hard clip
-                soft_time_bound = (
-                    torch.nn.functional.softplus(time_lower - gaussians.get_t, beta=time_soft_beta)
-                    + torch.nn.functional.softplus(gaussians.get_t - time_upper, beta=time_soft_beta)
-                )
-                loss += 0.1 * soft_time_bound.mean()
+                # time_lower, time_upper = 0, 3
+                # time_soft_beta = 20.0  # larger beta makes the boundary closer to hard clip
+                # soft_time_bound = (
+                #     torch.nn.functional.softplus(gaussians.get_t - time_lower, beta=time_soft_beta)
+                #     + torch.nn.functional.softplus(time_upper - gaussians.get_t, beta=time_soft_beta) 
+                #     #+ torch.nn.functional.softplus(high_opa_effect_range - 1/30 * 32, beta=time_soft_beta)
+                # )
+                # loss += 1 * soft_time_bound.mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 0.03333333333333333, min = 0.0).mean()
                 #loss += 1 * torch.clip(0.03333333333333333 - gaussians.get_t, min = 0.0).mean()
                 #loss += 1 * torch.clip(2.4 - gaussians.get_t, min = 0.0).mean()
@@ -724,7 +732,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if iteration < 5000:
                     #     weight = 0.05
                     # else:
-                    weight = 0.03
+                    #weight = 0.03
                     normal = render_pkg["rendered_normal"]
                     depth_normal = render_pkg["depth_normal"]
                     normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-20)
@@ -756,15 +764,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
-                        normal_loss_abs = weight * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-                        normal_loss = weight * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
+                        #normal_loss_abs = 0.01 * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
+                        normal_loss = 0.03 * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
                         #normal_grad_loss = 0.01 * (depth_grad * ((render_normal_grad.detach() - depth_normal_grad).abs().sum(dim=0))).mean()
                         #pass
                     else:
                         pass
                        # normal_loss = weight * (((depth_normal - normal)).abs().sum(0)).mean()
                     loss += (normal_loss)# + (((normal_image - normal)).abs().sum(0)).mean()
-                    loss += (normal_loss_abs)
+                    #loss += (normal_loss_abs)
                     #loss += normal_grad_loss
                     loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
                     # if iteration > 20000:
@@ -791,7 +799,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
                     if iteration > 15000:
                         # pass
-                        loss += 0.01 * (local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()).mean()
+                        local_opa = local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()
+                        loss += 0.01 * safe_mean(local_opa)
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
