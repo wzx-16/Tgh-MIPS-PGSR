@@ -16,7 +16,7 @@ from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render, render_3d_pgsr_anti
 import torchvision
-from utils.general_utils import safe_state, safe_normalize, reflect
+from utils.general_utils import safe_state, safe_normalize, reflect, print_tensor_distribution
 from utils.image_utils import psnr
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
@@ -32,6 +32,43 @@ def _clone_tensor_attr(src_tensor):
     if isinstance(src_tensor, torch.nn.Parameter):
         return torch.nn.Parameter(cloned.requires_grad_(True))
     return cloned
+
+# def print_tensor_distribution(name, tensor, bins=10):
+#     with torch.no_grad():
+#         values = tensor.detach().reshape(-1).float()
+#         total_count = values.numel()
+#         if total_count == 0:
+#             print(f"{name} distribution: empty")
+#             return
+
+#         finite_values = values[torch.isfinite(values)]
+#         finite_count = finite_values.numel()
+#         if finite_count == 0:
+#             print(f"{name} distribution: total={total_count}, finite=0")
+#             return
+
+#         quantiles = torch.quantile(
+#             finite_values,
+#             torch.tensor([0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0], device=finite_values.device),
+#         ).detach().cpu().tolist()
+#         mean = finite_values.mean().item()
+#         std = finite_values.std(unbiased=False).item()
+
+#         min_value = quantiles[0]
+#         max_value = quantiles[-1]
+#         if min_value == max_value:
+#             hist_counts = [finite_count]
+#             hist_edges = [min_value, max_value]
+#         else:
+#             hist_counts = torch.histc(finite_values, bins=bins, min=min_value, max=max_value).detach().cpu().int().tolist()
+#             hist_edges = torch.linspace(min_value, max_value, bins + 1).tolist()
+
+#         print(
+#             f"{name} distribution: total={total_count}, finite={finite_count}, "
+#             f"mean={mean:.6g}, std={std:.6g}, "
+#             f"min/p01/p05/median/p95/p99/max={[round(value, 6) for value in quantiles]}, "
+#             f"hist_edges={[round(value, 6) for value in hist_edges]}, hist_counts={hist_counts}"
+#         )
 
 def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel):
     local_model.gsdim = global_model.gsdim
@@ -140,6 +177,8 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         #print(timestamp_first)
         print(viewpoint_cam.image_height, viewpoint_cam.image_width)
         tgh.put_current_related_gaussians(timestamp, gaussians, True)
+        velocity2 = gaussians.get_velocity2
+        print_tensor_distribution("velocity2[..., 0]", velocity2[..., 0:1])
         #gaussians._feature_rest = None
         #timestamp = viewpoint_cam.timestamp
         time_range = viewpoint_cam.timestamp - gaussians.get_t
@@ -155,13 +194,13 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
         #mt = torch.sigmoid((mt - 0.5) * 14)
         #mt = torch.sigmoid((mt - 0.5) * (12 + gaussians.get_specular[..., 0:1]))
-        # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-        # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-        # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+        scaler = (torch.sigmoid(0.5 * (gaussians.get_velocity2[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1])))
+        min_opa = torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1]))
+        mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_velocity2[..., 0:1])) - min_opa) / scaler
         opacity = gaussians.get_opacity * mt
         #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
-        iteration = 45000
+        iteration = 80000
         #shs = None
         # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
         # if iteration <= 5000:

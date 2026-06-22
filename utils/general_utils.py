@@ -210,3 +210,41 @@ def fps(x, k):
     new_offset = torch.cumsum(new_offset, dim=0).int()
     idx = furthestsampling(x, offset, new_offset).long()
     return idx
+
+def print_tensor_distribution(name, tensor, bins=10):
+    with torch.no_grad():
+        values = tensor.detach().reshape(-1).float()
+        total_count = values.numel()
+        if total_count == 0:
+            print(f"{name} distribution: empty")
+            return
+
+        finite_values = values[torch.isfinite(values)]
+        finite_count = finite_values.numel()
+        if finite_count == 0:
+            print(f"{name} distribution: total={total_count}, finite=0")
+            return
+
+        quantiles = torch.quantile(
+            finite_values,
+            torch.tensor([0.0, 0.01, 0.05, 0.5, 0.95, 0.99, 1.0], device=finite_values.device),
+        ).detach().cpu().tolist()
+        mean = finite_values.mean().item()
+        std = finite_values.std(unbiased=False).item()
+
+        min_value = quantiles[0]
+        max_value = quantiles[-1]
+        if min_value == max_value:
+            hist_counts = [finite_count]
+            hist_edges = [min_value, max_value]
+        else:
+            hist_counts = torch.histc(finite_values, bins=bins, min=min_value, max=max_value).detach().cpu().int().tolist()
+            hist_edges = torch.linspace(min_value, max_value, bins + 1).tolist()
+
+        print(
+            f"{name} distribution: total={total_count}, finite={finite_count}, "
+            f"mean={mean:.6g}, std={std:.6g}, "
+            f"min/p01/p05/median/p95/p99/max={[round(value, 6) for value in quantiles]}, "
+            f"hist_edges={[round(value, 6) for value in hist_edges]}, hist_counts={hist_counts}"
+        )
+

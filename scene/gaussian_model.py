@@ -1273,7 +1273,9 @@ class GaussianModel:
     
     @property
     def get_velocity2(self):
-        return self._velocity2
+        # return self._velocity2
+        #return torch.exp(torch.clamp(self._velocity2, max=3.0))
+        return torch.clamp(self._velocity2, max=20.0)
     
     @property
     def get_velocity3(self):
@@ -1631,10 +1633,10 @@ class GaussianModel:
                             # velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
                             velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (torch.clip(self.scaling_activation(scales_t) ** 2, min=1.0))) 
                             #velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30)
-                            velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                            velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 7
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                            specular = torch.ones((fused_point_cloud.shape[0], 4), device=self.device)
+                            specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
                             #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                             #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1752,10 +1754,10 @@ class GaussianModel:
                 scales_t = torch.log(math.sqrt(-0.5 / math.log(0.7)) * dist_t)
                 if self.rot_4d:
                     velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                    velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 7
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
-                    specular = torch.ones((fused_point_cloud.shape[0], 4), device=self.device)
+                    specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular2 = torch.zeros((fused_point_cloud.shape[0], 44), device=self.device)
                     #specular2 = torch.zeros((fused_point_cloud.shape[0], 20), device=self.device)
                     #specular2 = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1902,7 +1904,7 @@ class GaussianModel:
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
             if self.rot_4d:
                 l.append({'params': [self._velocity], 'lr': training_args.rotation_lr / 10, "name": "velocity"})
-                l.append({'params': [self._velocity2], 'lr': training_args.rotation_lr / 50, "name": "velocity2"})
+                l.append({'params': [self._velocity2], 'lr': training_args.feature_lr / 5, "name": "velocity2"})
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.feature_lr * 5, "name": "specular"})
@@ -1922,7 +1924,7 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 10,
-                                                    lr_final=training_args.rotation_lr / 20,
+                                                    lr_final=training_args.rotation_lr / 40,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
         self.velocity2_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 50,
@@ -1946,10 +1948,10 @@ class GaussianModel:
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
-        self.scaling_t_scheduler_args = get_expon_lr_func(lr_init=training_args.scaling_lr,
-                                                    lr_final=training_args.scaling_lr / 2,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+        # self.scaling_t_scheduler_args = get_expon_lr_func(lr_init=training_args.scaling_lr,
+        #                                             lr_final=training_args.scaling_lr / 2,
+        #                                             lr_delay_mult=training_args.position_lr_delay_mult,
+        #                                             max_steps=training_args.position_lr_max_steps)
 
         self.specular_feature_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr * 5,
                                                     lr_final=training_args.feature_lr,
@@ -1974,10 +1976,10 @@ class GaussianModel:
                 lr = self.xyz_scheduler_args(iteration)
                 param_group['lr'] = lr
                 #return lr
-            # if param_group["name"] == "velocity":
-            #     lr = self.velocity_scheduler_args(iteration)
-            #     param_group["lr"] = lr
-            #     #return lr
+            if param_group["name"] == "velocity":
+                lr = self.velocity_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
             if param_group["name"] == "brdf_mlp":
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
@@ -2328,7 +2330,8 @@ class GaussianModel:
         new_xyz = torch.cat((new_xyz_before, new_xyz_after), dim=0)
         new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask] * 0.501).repeat(N,1)
         #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
-        new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+        #new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+        new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
         new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
         new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
         # new_specular = self._specular[selected_pts_mask].repeat(N,1)
@@ -2538,7 +2541,8 @@ class GaussianModel:
             #new_scaling_t = torch.zeros_like(self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))) + torch.log(torch.tensor(0.4 * 20))
             new_scaling_t = self._scaling_t[selected_pts_mask].repeat(N,1)
             #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
-            new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+            #new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+            new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
             new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
             new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
             new_specular = self._specular[selected_pts_mask].repeat(N,1)
@@ -2593,7 +2597,8 @@ class GaussianModel:
             new_scaling_t = self._scaling_t[selected_pts_mask]
             if self.rot_4d:
                 #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask])
-                new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask])
+                #new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask])
+                new_velocity2 = self._velocity2[selected_pts_mask]
                 new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask])
                 new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask])
                 new_specular = self._specular[selected_pts_mask]

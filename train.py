@@ -39,6 +39,7 @@ import time
 import torch.multiprocessing
 from torchvision import transforms
 import torchvision
+from utils.general_utils import print_tensor_distribution
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -215,12 +216,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             densification_interval = 100
         elif iteration < 6000:
             densification_interval = 200
-        elif iteration < 20000:
+        elif iteration < 15000:
             densification_interval = 300
         elif iteration < 30000:
             densification_interval = 500
-        else:
+        elif iteration < 35000:
             densification_interval = 1000
+        else:
+            densification_interval = 2000
         for batch_data in training_dataloader:
             #train_start = time.time()
             iteration += 1
@@ -342,9 +345,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
                 mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-                # scaler = (torch.sigmoid(0.5 * (gaussians.get_specular[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1])))
-                # min_opa = torch.sigmoid(-0.5 * (gaussians.get_specular[..., 0:1]))
-                # mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_specular[..., 0:1])) - min_opa) / scaler
+                scaler = (torch.sigmoid(0.5 * (gaussians.get_velocity2[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1])))
+                min_opa = torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1]))
+                mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_velocity2[..., 0:1])) - min_opa) / scaler
                 #mt = torch.sigmoid((mt - 0.5) * 14)
                 # print("mt size and specular size", mt.shape, gaussians.get_specular[..., 0:1].shape)
                 # print("specular max", gaussians.get_specular[..., 0:1].max())
@@ -483,7 +486,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # loss += 0.1 * ((1 - spec_coeff).mean())
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 20000:
+                if iteration < 30000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -653,16 +656,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # min_opa_inversigmoid = torch.log(torch.tensor(0.05, device="cuda") / (1 - 0.05)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
                 # high_opa_inversigmoid = torch.log(torch.tensor(0.95, device="cuda") / (1 - 0.95)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
 
-                # min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
-                # max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_specular[..., 0:1] + 0.5
+                min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_velocity2[..., 0:1] + 0.5
+                max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_velocity2[..., 0:1] + 0.5
 
-                effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
-                high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
+                # effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
+                # high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
                 # effect_range = torch.sqrt(-2 * torch.log(min_opa_inversigmoid) * cov_t)
                 # high_opa_effect_range = torch.sqrt(-2 * torch.log(high_opa_inversigmoid) * cov_t)
 
-                # effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
-                # high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
+                effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
+                high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
 
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
@@ -796,17 +799,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # gs_in[outside_mask] = 0.0
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
-                        loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
+                        loss += 0.02 * gaussians.get_opacity[visibility_filter].mean()
                     if iteration > 15000:
                         # pass
                         local_opa = local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()
                         loss += 0.01 * safe_mean(local_opa)
                         #loss += 0.001 * gaussians.get_opacity.mean()
-                    density_loss = entropy_loss(opacity[visibility_filter])
-                    #density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
+                    # density_loss = entropy_loss(opacity[visibility_filter])
+                    density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
                     if iteration > 3000:
                         #pass
                         loss += density_loss * 0.01
+                        loss += -gaussians._velocity2[visibility_filter].mean() * 0.02
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
                 loss = loss / batch_size
@@ -881,7 +885,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             iter_end.record()
             loss_dict = {"Ll1": Ll1,
                         "Lssim": Lssim}
-            
+            if iteration % 100 == 0:
+                velocity2 = gaussians.get_velocity2
+                print_tensor_distribution("velocity2[..., 0]", velocity2[..., 0:1])
             with torch.no_grad():
                 #optimizer_start = time.time()
                 psnr_for_log = psnr(image, gt_image).mean()
