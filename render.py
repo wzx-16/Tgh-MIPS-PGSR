@@ -167,6 +167,8 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     for idx, view in enumerate(tqdm(views, desc="Rendering progress")):
         #rendering = render(view[1].cuda(), gaussians, pipeline, background)["render"]
         viewpoint_cam = view[2].cuda()
+        if not (viewpoint_cam.image_name.endswith("000069") or viewpoint_cam.image_name.endswith("000071") or viewpoint_cam.image_name.endswith("000070")):
+            continue
         #viewpoint_cam.timestamp += 1/60
         timestamp = viewpoint_cam.timestamp
         # if timestamp_first < 0:
@@ -200,7 +202,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         opacity = gaussians.get_opacity * mt
         #opacity = torch.sigmoid((opacity - 0.5) * 14)
         shs = gaussians.get_features
-        iteration = 80000
+        iteration = 70000
         #shs = None
         # ma = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
         # if iteration <= 5000:

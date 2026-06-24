@@ -810,7 +810,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if iteration > 3000:
                         #pass
                         loss += density_loss * 0.01
-                        loss += -gaussians._velocity2[visibility_filter].mean() * 0.02
+                        #loss += -gaussians._velocity2[visibility_filter].mean() * 0.02
+                        target_k = 4.0 + 10.0 * min(1.0, max(0.0, (iteration - 15000) / 15000))
+                        k = gaussians.get_velocity2[..., 0:1]
+                        loss += 0.01 * ((k[visibility_filter] - target_k) ** 2).mean()
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
                 loss = loss / batch_size

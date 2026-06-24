@@ -32,16 +32,16 @@ PipelineParams:
   eval_shfs_4d: True
 
 OptimizationParams:
-  iterations: 80_000
+  iterations: 70_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 80_000
+  position_lr_max_steps: 70_000
   brdf_mlp_lr_init : 0.016
   brdf_mlp_lr_final : 0.00016
   brdf_mlp_lr_delay_mult : 0.01
-  brdf_mlp_lr_max_steps : 80_000
+  brdf_mlp_lr_max_steps : 70_000
   feature_lr: 0.002
   opacity_lr: 0.05
   scaling_lr: 0.005

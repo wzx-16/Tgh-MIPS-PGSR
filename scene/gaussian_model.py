@@ -1275,7 +1275,7 @@ class GaussianModel:
     def get_velocity2(self):
         # return self._velocity2
         #return torch.exp(torch.clamp(self._velocity2, max=3.0))
-        return torch.clamp(self._velocity2, max=20.0)
+        return torch.clamp(self._velocity2, max=12.0)
     
     @property
     def get_velocity3(self):
@@ -1633,7 +1633,7 @@ class GaussianModel:
                             # velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
                             velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (torch.clip(self.scaling_activation(scales_t) ** 2, min=1.0))) 
                             #velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30)
-                            velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 7
+                            velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 3
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1754,7 +1754,7 @@ class GaussianModel:
                 scales_t = torch.log(math.sqrt(-0.5 / math.log(0.7)) * dist_t)
                 if self.rot_4d:
                     velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 7
+                    velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 3
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1904,7 +1904,7 @@ class GaussianModel:
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
             if self.rot_4d:
                 l.append({'params': [self._velocity], 'lr': training_args.rotation_lr / 10, "name": "velocity"})
-                l.append({'params': [self._velocity2], 'lr': training_args.feature_lr / 5, "name": "velocity2"})
+                l.append({'params': [self._velocity2], 'lr': training_args.feature_lr / 10, "name": "velocity2"})
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.feature_lr * 5, "name": "specular"})
@@ -1944,7 +1944,7 @@ class GaussianModel:
                                         lr_delay_mult=training_args.encoding_lr_delay_mult,
                                         max_steps=training_args.encoding_lr_max_steps)
         self.t_scheduler_args = get_expon_lr_func(lr_init=training_args.position_t_lr_init * self.spatial_lr_scale / 3,
-                                                    lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 6,
+                                                    lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 12,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
@@ -1984,10 +1984,10 @@ class GaussianModel:
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
                 #return lr
-            # if param_group["name"] == "t":
-            #     lr = self.t_scheduler_args(iteration)
-            #     param_group["lr"] = lr
-            #     #return lr
+            if param_group["name"] == "t":
+                lr = self.t_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
             # if param_group["name"] == "scaling_t":
             #     lr = self.scaling_t_scheduler_args(iteration)
             #     param_group["lr"] = lr
