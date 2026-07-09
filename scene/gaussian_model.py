@@ -27,6 +27,25 @@ import gc
 from scene.NVDIFFREC import create_trainable_env_rnd
 import nvdiffrast.torch
 
+
+
+def _parse_frame_filter(frame_filter):
+    if frame_filter is None or frame_filter == "":
+        return None
+    if isinstance(frame_filter, (list, tuple, set)):
+        return {int(value) for value in frame_filter}
+    frames = set()
+    for part in str(frame_filter).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            frames.update(range(int(start), int(end) + 1))
+        else:
+            frames.add(int(part))
+    return frames
+
 class SphMipEncoding(nn.Module):
     def __init__(
         self,
@@ -226,6 +245,15 @@ class GaussianModel:
         self._roughness = torch.empty(0, device=device)
         self._delta_normal = torch.empty(0, device=device)
         self.default_roughness = 0.6
+        self.temporal_opacity_mode = "normalized_sigmoid"
+        self.temporal_flat_radius_mult = 0.75
+        self.temporal_flat_edge_sigma_mult = 2.0
+        self.temporal_flat_radius_start_mult = self.temporal_flat_radius_mult
+        self.temporal_flat_radius_final_mult = self.temporal_flat_radius_mult
+        self.temporal_flat_radius_ramp_start = 0
+        self.temporal_flat_radius_ramp_end = 0
+        self.temporal_flat_range_level = 0.05
+        self.temporal_schedule_iteration = None
 
         
         self.sph_dim = 16
@@ -1257,7 +1285,11 @@ class GaussianModel:
 
     @property
     def get_sigma_t_fixed(self):
-        return torch.clip(self.scaling_activation(self._scaling_t) ** 2, min=1.0)
+        # sigma_t = self.scaling_activation(self._scaling_t) ** 2
+        # if getattr(self, "temporal_opacity_mode", "normalized_sigmoid") == "flat_window":
+        #     sigma_t = sigma_t + self.get_temporal_flat_radius()
+        # return torch.clip(sigma_t, min=1.0)
+        return self.get_xyz.new_ones((self.get_xyz.shape[0], 1))
     
     @property
     def get_scaling_xyzt(self):
@@ -1378,6 +1410,8 @@ class GaussianModel:
     
     def get_diffuse(self, dir):
         return torch.clamp_min(eval_sh(0, self._features_dc.transpose(1, 2), None) + 0.5, 0)
+        # return eval_sh(0, self._features_dc.transpose(1, 2), None) + 0.5
+
 
         #return eval_sh(2, self.get_features.transpose(1, 2), dir)
     
@@ -1385,6 +1419,129 @@ class GaussianModel:
         sigma = self.get_sigma_t * scaling_modifier ** 2
         return torch.exp(-0.5*(self.get_t-timestamp)**2/sigma) # / torch.sqrt(2*torch.pi*sigma)
     
+
+    def get_temporal_opacity_factor(self, timestamp, scaling_modifier = 1):
+        marginal_t = self.get_marginal_t(timestamp, scaling_modifier)
+        mode = getattr(self, "temporal_opacity_mode", "normalized_sigmoid")
+        if mode == "gaussian" or not (self.gaussian_dim == 4 and self.rot_4d):
+            return marginal_t
+
+        if mode == "flat_window":
+            flat_radius, edge_sigma = self.get_temporal_flat_window(scaling_modifier)
+            dt = torch.abs(self.get_t - timestamp)
+            edge_dt = torch.clamp_min(dt - flat_radius, 0.0)
+            return torch.exp(-0.5 * (edge_dt / torch.clamp_min(edge_sigma, 1.0e-6)) ** 2)
+
+        k = self.get_temporal_opacity_slope()
+        if mode == "pure_sigmoid":
+            return torch.sigmoid((marginal_t - 0.5) * k)
+        if mode == "normalized_sigmoid":
+            min_opa = torch.sigmoid(-0.5 * k)
+            scaler = torch.sigmoid(0.5 * k) - min_opa
+            return (torch.sigmoid((marginal_t - 0.5) * k) - min_opa) / torch.clamp_min(scaler, 1.0e-6)
+
+        raise ValueError(f"Unknown temporal_opacity_mode: {mode}")
+
+    def get_temporal_opacity_slope(self):
+        return torch.clamp(torch.abs(self.get_velocity2[..., 0:1]), min=1.0e-4)
+
+    def get_temporal_edge_sigma(self, scaling_modifier = 1):
+        return torch.clamp_min((self.get_scaling_t ** 2) * scaling_modifier, 1.0e-6)
+
+    def get_temporal_flat_radius(self, scaling_modifier = 1):
+        scale_t = torch.clamp_min(self.get_scaling_t * scaling_modifier, 1.0e-6)
+        if not (self.gaussian_dim == 4 and self.rot_4d) or self._velocity2.numel() == 0:
+            return torch.zeros_like(scale_t)
+        if self._velocity2.shape[-1] < 1:
+            return torch.zeros_like(scale_t)
+        # flat_radius = torch.nn.functional.softplus(torch.clamp(self._velocity2[..., 0:1], min=-20.0, max=20.0))
+        flat_radius = self._velocity2[..., 0:1]
+        return torch.clamp_min(flat_radius * scaling_modifier, 0.0)
+
+    def temporal_flat_radius_inverse_activation(self, flat_radius):
+        # flat_radius = torch.clamp_min(flat_radius, 1.0e-8)
+        # return torch.where(flat_radius > 20.0, flat_radius, torch.log(torch.expm1(flat_radius)))
+        return flat_radius
+
+    # def get_temporal_flat_radius_mult(self):
+    #     scale_t = torch.clamp_min(self.get_scaling_t, 1.0e-6)
+    #     return self.get_temporal_flat_radius() / scale_t
+
+    def get_temporal_flat_window(self, scaling_modifier = 1):
+        flat_radius = self.get_temporal_flat_radius(scaling_modifier)
+        edge_sigma = self.get_temporal_edge_sigma(scaling_modifier)
+        return flat_radius, edge_sigma
+
+    def get_temporal_flat_ratio(self, opacity_level=0.05):
+        flat_radius = self.get_temporal_flat_radius()
+        effect_range = self.get_temporal_range_for_opacity(opacity_level)
+        return flat_radius / torch.clamp_min(effect_range, 1.0e-6)
+
+    def get_temporal_marginal_for_opacity(self, opacity_level):
+        k = self.get_temporal_opacity_slope()
+        level = torch.as_tensor(opacity_level, dtype=k.dtype, device=k.device)
+        mode = getattr(self, "temporal_opacity_mode", "normalized_sigmoid")
+
+        if mode == "gaussian" or not (self.gaussian_dim == 4 and self.rot_4d):
+            marginal_t = level.expand_as(k)
+        elif mode == "flat_window":
+            flat_radius, edge_sigma = self.get_temporal_flat_window()
+            target = torch.clamp(level.expand_as(k), min=1.0e-6, max=1.0)
+            temporal_range = flat_radius + edge_sigma * torch.sqrt(-2.0 * torch.log(target))
+            marginal_t = torch.exp(-0.5 * ((temporal_range - flat_radius) / torch.clamp_min(edge_sigma, 1.0e-6)) ** 2)
+        elif mode == "pure_sigmoid":
+            target = torch.clamp(level.expand_as(k), min=1.0e-6, max=1.0 - 1.0e-6)
+            marginal_t = inverse_sigmoid(target) / k + 0.5
+        elif mode == "normalized_sigmoid":
+            min_opa = torch.sigmoid(-0.5 * k)
+            scaler = torch.sigmoid(0.5 * k) - min_opa
+            target = torch.clamp(level * scaler + min_opa, min=1.0e-6, max=1.0 - 1.0e-6)
+            marginal_t = inverse_sigmoid(target) / k + 0.5
+        else:
+            raise ValueError(f"Unknown temporal_opacity_mode: {mode}")
+
+        return torch.clamp(marginal_t, min=1.0e-6, max=1.0 - 1.0e-6)
+
+    def get_temporal_range_for_opacity(self, opacity_level):
+        mode = getattr(self, "temporal_opacity_mode", "normalized_sigmoid")
+        if mode == "flat_window" and self.gaussian_dim == 4 and self.rot_4d:
+            flat_radius, edge_sigma = self.get_temporal_flat_window()
+            target = torch.as_tensor(opacity_level, dtype=flat_radius.dtype, device=flat_radius.device)
+            target = torch.clamp(target.expand_as(flat_radius), min=1.0e-6, max=1.0)
+            return flat_radius + edge_sigma * torch.sqrt(-2.0 * torch.log(target))
+
+        marginal_t = self.get_temporal_marginal_for_opacity(opacity_level)
+        range_sq = torch.clamp_min(-2.0 * torch.log(marginal_t), 0.0)
+        return torch.clamp_min(self.get_scaling_t, 1.0e-6) * torch.sqrt(range_sq)
+
+    def get_temporal_split_params(self, selected_pts_mask, N=2):
+        N = int(N)
+        if N < 2:
+            raise ValueError(f"Temporal split requires N >= 2, got {N}")
+
+        parent_t = self.get_t[selected_pts_mask]
+        parent_scaling_t = torch.clamp_min(self.get_scaling_t[selected_pts_mask], 1.0e-6)
+        mode = getattr(self, "temporal_opacity_mode", "normalized_sigmoid")
+
+        if mode == "flat_window":
+            # Keep edge sigma unchanged after time split.  Since edge sigma is
+            # derived from scaling_t, each child keeps the parent's scaling_t.
+            child_scaling_t = parent_scaling_t
+            child_center_offset = self.get_temporal_flat_radius()[selected_pts_mask] / float(N)
+        else:
+            child_scaling_t = parent_scaling_t / float(N)
+            parent_peak = self.get_temporal_opacity_factor(self.get_t).detach()
+            center_level = torch.clamp(parent_peak / float(N), min=1.0e-6, max=1.0 - 1.0e-6)
+            child_center_offset = self.get_temporal_range_for_opacity(center_level)[selected_pts_mask] / float(N)
+
+        child_scaling_t_log = self.scaling_inverse_activation(child_scaling_t)
+        split_index = torch.arange(N, dtype=parent_t.dtype, device=parent_t.device) - (N - 1) / 2.0
+        time_offsets = (2.0 * split_index[:, None, None] * child_center_offset[None]).reshape(-1, 1)
+
+        new_t = parent_t.repeat(N, 1) + time_offsets
+        new_scaling_t = child_scaling_t_log.repeat(N, 1)
+        return new_t, new_scaling_t, time_offsets, child_scaling_t
+
     def get_covariance(self, scaling_modifier = 1):
         return self.covariance_activation(self.get_scaling, scaling_modifier, self._rotation)
 
@@ -1562,7 +1719,7 @@ class GaussianModel:
                 self._delta_normal = nn.Parameter(delta_normal.requires_grad_(True))
                 self._roughness = nn.Parameter(roughness.requires_grad_(True))
 
-    def create_from_multi_pcd(self, path, tgh, spatial_lr_scale : float, time_duration=None):
+    def create_from_multi_pcd(self, path, tgh, spatial_lr_scale : float, time_duration=None, max_points=None, frame_filter=None):
         self.spatial_lr_scale = spatial_lr_scale
         self._xyz = None
         pcd_parent_path = os.path.join(path, 'pcds_j10')
@@ -1570,13 +1727,55 @@ class GaussianModel:
         #pcd_list = ["points3d.ply" for i in range(200)]
         pcd_list = sorted(pcd_list)
         fps = 30.
+        temporal_init_range_level = 0.05
+        temporal_init_edge_range = 0.5 / fps
+        temporal_init_edge_sigma = temporal_init_edge_range / math.sqrt(-2.0 * math.log(temporal_init_range_level))
+        temporal_init_scaling_t = math.sqrt(temporal_init_edge_sigma)
+        temporal_init_scaling_t_log = math.log(max(temporal_init_scaling_t, 1.0e-8))
+        # The renderer stores flat_radius as a half-width.  A one-frame flat
+        # region therefore starts with a half-width of 0.5 / fps.
+        temporal_init_flat_radius = 0.5 / fps
+        # temporal_init_flat_raw = math.log(math.expm1(max(temporal_init_flat_radius, 1.0e-8)))
+        temporal_init_flat_raw = temporal_init_flat_radius
+        temporal_static_init_flat_radius = 30.0 / fps
+        # temporal_static_init_flat_raw = math.log(math.expm1(max(temporal_static_init_flat_radius, 1.0e-8)))
+        temporal_static_init_flat_raw = temporal_static_init_flat_radius
+        #temporal_init_sigma_t_fixed = max(temporal_init_edge_sigma + temporal_init_flat_radius, 1.0)
+        temporal_init_sigma_t_fixed = 1.0
+        print(
+            "Temporal init:",
+            "flat_width", 1.0 / fps,
+            "flat_radius", temporal_init_flat_radius,
+            "edge_range_0.05", temporal_init_edge_range,
+            "edge_sigma", temporal_init_edge_sigma,
+            "scaling_t", temporal_init_scaling_t,
+            "sigma_t_fixed", temporal_init_sigma_t_fixed,
+            "flat_raw", temporal_init_flat_raw,
+            "static_flat_radius", temporal_static_init_flat_radius,
+            "static_flat_raw", temporal_static_init_flat_raw,
+        )
+        frame_filter_set = _parse_frame_filter(frame_filter)
         points_before = None
+        selected_frame_count = 0
+        for frame_idx, _ in enumerate(pcd_list[:]):
+            if frame_idx < 81 and frame_idx >= 19:
+                if frame_filter_set is not None and frame_idx not in frame_filter_set:
+                    continue
+                timestamp = frame_idx / fps
+                if time_duration is not None and (timestamp < time_duration[0] or timestamp > time_duration[1]):
+                    continue
+                selected_frame_count += 1
+        frame_point_limit = 50000
+        if max_points is not None and selected_frame_count > 0:
+            frame_point_limit = max(1, min(frame_point_limit, int(math.ceil(max_points / selected_frame_count))))
         with torch.no_grad():
         # pcd_list = ['points.ply' for _ in range(640)]
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
                 if ii < 81 and ii >= 19:
+                    if frame_filter_set is not None and ii not in frame_filter_set:
+                        continue
                 #if ii < 60 and ii >= 0:
                 #if ii == 71:
                 #if ii < 10:
@@ -1593,8 +1792,8 @@ class GaussianModel:
                     #break
                     ply_path = os.path.join(pcd_parent_path, pcd_path)
                     pcd = fetchPly(ply_path)
-                    if pcd.points.shape[0] > 50000:
-                        mask = np.random.randint(0, pcd.points.shape[0], 50000)
+                    if pcd.points.shape[0] > frame_point_limit:
+                        mask = np.random.randint(0, pcd.points.shape[0], frame_point_limit)
                         xyz = pcd.points[mask]
                         rgb = pcd.colors[mask]
                         normals = pcd.normals[mask]
@@ -1627,13 +1826,13 @@ class GaussianModel:
                         # dist_t = torch.clamp_min(distCUDA2(fused_times.repeat(1,3)), 1e-10)[...,None]
                         # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 1000
                         dist_t = (torch.zeros_like(fused_times, device=self.device) + seg / 2) / 1
-                        #scales_t = torch.log(torch.sqrt(dist_t))
-                        scales_t = torch.log(math.sqrt(-0.5 / math.log(0.05)) * dist_t)
+                        # scaling_t is initialized so the edge opacity remains above
+                        # 0.05 for about half a frame outside the flat region.
+                        scales_t = torch.full_like(fused_times, temporal_init_scaling_t_log, device=self.device)
                         if self.rot_4d:
-                            # velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (1 + self.scaling_activation(scales_t)**2)) 
-                            velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30 * (torch.clip(self.scaling_activation(scales_t) ** 2, min=1.0))) 
-                            #velocity = (torch.zeros((fused_point_cloud.shape[0], 3), device=self.device) + (fused_point_cloud - dist2b) * 30)
-                            velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 3
+                            velocity = (fused_point_cloud - dist2b) * fps * temporal_init_sigma_t_fixed
+                            velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                            velocity2[..., 0:1] = temporal_init_flat_raw
                             velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                             rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                             specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1698,13 +1897,13 @@ class GaussianModel:
                     # del self.optimizer
                     # gc.collect()
                     #torch.cuda.empty_cache()
-                    print(torch.cuda.memory_summary())
                     points_before = fused_point_cloud
 
         ply_path = os.path.join(path, 'points3d.ply')
         pcd = fetchPly(ply_path)
-        if pcd.points.shape[0] > 500000:
-            mask = np.random.randint(0, pcd.points.shape[0], 500000)
+        final_point_limit = 500000 if max_points is None else max(1, int(max_points))
+        if pcd.points.shape[0] > final_point_limit:
+            mask = np.random.randint(0, pcd.points.shape[0], final_point_limit)
             xyz = pcd.points[mask]
             rgb = pcd.colors[mask]
             normals = pcd.normals[mask]
@@ -1750,11 +1949,13 @@ class GaussianModel:
                 dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
                 # dist_t = torch.zeros_like(fused_times, device=self.device)
-                # scales_t = torch.log(torch.sqrt(dist_t))
-                scales_t = torch.log(math.sqrt(-0.5 / math.log(0.7)) * dist_t)
+                # Static points use the same sharp edge, but a much wider
+                # flat half-width so they cover the full 20-80 frame window.
+                scales_t = torch.full_like(fused_times, temporal_init_scaling_t_log, device=self.device)
                 if self.rot_4d:
                     velocity = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
-                    velocity2 = torch.ones((fused_point_cloud.shape[0], 3), device=self.device) * 3
+                    velocity2 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
+                    velocity2[..., 0:1] = temporal_static_init_flat_raw
                     velocity3 = torch.zeros((fused_point_cloud.shape[0], 3), device=self.device)
                     rot_velocity = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
                     specular = torch.zeros((fused_point_cloud.shape[0], 4), device=self.device)
@@ -1900,11 +2101,27 @@ class GaussianModel:
             if training_args.position_t_lr_init < 0:
                 training_args.position_t_lr_init = training_args.position_lr_init
             self.t_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+            velocity2_lr_init = getattr(training_args, "velocity2_lr_init", -1.0)
+            velocity2_lr_final = getattr(training_args, "velocity2_lr_final", -1.0)
+            velocity2_lr_delay_mult = getattr(training_args, "velocity2_lr_delay_mult", -1.0)
+            velocity2_lr_max_steps = getattr(training_args, "velocity2_lr_max_steps", -1)
+            if velocity2_lr_init < 0:
+                velocity2_lr_init = training_args.scaling_lr
+            if velocity2_lr_final < 0:
+                velocity2_lr_final = velocity2_lr_init
+            if velocity2_lr_delay_mult < 0:
+                velocity2_lr_delay_mult = 1.0
+            if velocity2_lr_max_steps < 0:
+                velocity2_lr_max_steps = training_args.position_lr_max_steps
+            self._velocity2_lr_init = velocity2_lr_init
+            self._velocity2_lr_final = velocity2_lr_final
+            self._velocity2_lr_delay_mult = velocity2_lr_delay_mult
+            self._velocity2_lr_max_steps = velocity2_lr_max_steps
             l.append({'params': [self._t], 'lr': training_args.position_t_lr_init * self.spatial_lr_scale / 3, "name": "t"})
             l.append({'params': [self._scaling_t], 'lr': training_args.scaling_lr, "name": "scaling_t"})
             if self.rot_4d:
-                l.append({'params': [self._velocity], 'lr': training_args.rotation_lr / 10, "name": "velocity"})
-                l.append({'params': [self._velocity2], 'lr': training_args.feature_lr / 10, "name": "velocity2"})
+                l.append({'params': [self._velocity], 'lr': training_args.rotation_lr / 30, "name": "velocity"})
+                l.append({'params': [self._velocity2], 'lr': velocity2_lr_init, "name": "velocity2"})
                 l.append({'params': [self._velocity3], 'lr': training_args.rotation_lr / 50, "name": "velocity3"})
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.feature_lr * 5, "name": "specular"})
@@ -1923,20 +2140,24 @@ class GaussianModel:
                                                     lr_final=training_args.position_lr_final*self.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 10,
-                                                    lr_final=training_args.rotation_lr / 40,
+        self.velocity_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 30,
+                                                    lr_final=training_args.rotation_lr / 60,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        self.velocity2_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr / 50,
-                                                    lr_final=training_args.rotation_lr / 500,
-                                                    lr_delay_mult=training_args.position_lr_delay_mult,
-                                                    max_steps=training_args.position_lr_max_steps)
+        self.velocity2_scheduler_args = get_expon_lr_func(lr_init=self._velocity2_lr_init,
+                                                    lr_final=self._velocity2_lr_final,
+                                                    lr_delay_mult=self._velocity2_lr_delay_mult,
+                                                    max_steps=self._velocity2_lr_max_steps)
         self.brdf_mlp_scheduler_args = get_expon_lr_func(lr_init=training_args.brdf_mlp_lr_init,
                                         lr_final=training_args.brdf_mlp_lr_final,
                                         lr_delay_mult=training_args.brdf_mlp_lr_delay_mult,
                                         max_steps=training_args.brdf_mlp_lr_max_steps)
         self.light_mlp_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_lr_init * 2,
                                         lr_final=training_args.mlp_lr_init,
+                                        lr_delay_mult=training_args.mlp_lr_delay_mult,
+                                        max_steps=training_args.mlp_lr_max_steps)
+        self.light_mlp2_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_lr_init,
+                                        lr_final=training_args.mlp_lr_init / 2,
                                         lr_delay_mult=training_args.mlp_lr_delay_mult,
                                         max_steps=training_args.mlp_lr_max_steps)
         self.encoding_scheduler_args = get_expon_lr_func(lr_init=training_args.encoding_lr_init,
@@ -1947,7 +2168,10 @@ class GaussianModel:
                                                     lr_final=training_args.position_t_lr_init * self.spatial_lr_scale / 12,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-
+        self.albedo_scheduler_args = get_expon_lr_func(lr_init=training_args.albedo_lr,
+                                        lr_final=training_args.albedo_lr / 2,
+                                        lr_delay_mult=training_args.position_lr_delay_mult,
+                                        max_steps=training_args.position_lr_max_steps)
         # self.scaling_t_scheduler_args = get_expon_lr_func(lr_init=training_args.scaling_lr,
         #                                             lr_final=training_args.scaling_lr / 2,
         #                                             lr_delay_mult=training_args.position_lr_delay_mult,
@@ -2004,14 +2228,26 @@ class GaussianModel:
                 lr = self.light_mlp_scheduler_args(iteration)
                 param_group["lr"] = lr
                 #return lr
+            if param_group["name"] == "light_mlp2":
+                lr = self.light_mlp2_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "dir_encoding":
+                lr = self.encoding_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
+            if param_group["name"] == "albedo":
+                lr = self.albedo_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
             # if param_group["name"] == "opacity":
             #     lr = self.opacity_scheduler_args(iteration)
             #     param_group["lr"] = lr
             #     #return lr
-            # if param_group["name"] == "velocity2":
-            #     lr = self.velocity2_scheduler_args(iteration)
-            #     param_group["lr"] = lr
-            #     return lr
+            if param_group["name"] == "velocity2":
+                lr = self.velocity2_scheduler_args(iteration)
+                param_group["lr"] = lr
+                #return lr
             # if param_group["name"] == "velocity3":
             #     lr = self.velocity2_scheduler_args(iteration)
             #     param_group["lr"] = lr
@@ -2023,6 +2259,12 @@ class GaussianModel:
 
     def reset_opacity(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
+        optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
+        self._opacity = optimizable_tensors["opacity"]
+
+    def reset_opacity_zero(self, reset_value=1.0e-6):
+        opacities_new = torch.full_like(self.get_opacity, reset_value)
+        opacities_new = inverse_sigmoid(opacities_new)
         optimizable_tensors = self.replace_tensor_to_optimizer(opacities_new, "opacity")
         self._opacity = optimizable_tensors["opacity"]
 
@@ -2059,6 +2301,20 @@ class GaussianModel:
         optimizable_tensors = self.replace_tensor_to_optimizer(diffuse_new, "f_dc")
         self._features_dc = optimizable_tensors["f_dc"]
 
+    def reset_albedo_from_sh(self, min_albedo=1.0e-4, max_albedo=1.0):
+        with torch.no_grad():
+            sh_color = eval_sh(0, self._features_dc.transpose(1, 2), None) + 0.5
+            target_albedo = torch.clamp(sh_color, min=min_albedo, max=max_albedo)
+            albedo_new = torch.log(target_albedo * 5.0)
+        if self.optimizer is None:
+            self._albedo = nn.Parameter(albedo_new.requires_grad_(True))
+            return
+        optimizable_tensors = self.replace_tensor_to_optimizer(albedo_new, "albedo")
+        if "albedo" in optimizable_tensors:
+            self._albedo = optimizable_tensors["albedo"]
+        else:
+            self._albedo = nn.Parameter(albedo_new.requires_grad_(True))
+
     def reset_opacity_cpu(self):
         opacities_new = inverse_sigmoid(torch.min(self.get_opacity, torch.ones_like(self.get_opacity)*0.01))
         self._opacity = opacities_new
@@ -2077,12 +2333,14 @@ class GaussianModel:
         for group in self.optimizer.param_groups:
             if group["name"] == name:
                 stored_state = self.optimizer.state.get(group['params'][0], None)
-                stored_state["exp_avg"] = torch.zeros_like(tensor)
-                stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
+                if stored_state is not None:
+                    del self.optimizer.state[group['params'][0]]
+                    stored_state["exp_avg"] = torch.zeros_like(tensor)
+                    stored_state["exp_avg_sq"] = torch.zeros_like(tensor)
 
-                del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(tensor.requires_grad_(True))
-                self.optimizer.state[group['params'][0]] = stored_state
+                if stored_state is not None:
+                    self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
@@ -2233,7 +2491,7 @@ class GaussianModel:
         #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
         return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
 
-    def densify_and_split_time(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=2):
+    def densify_and_split_time(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=2, defer_prune=False, parent_exclusion_mask=None):
         if grad_spec_t_threshold is None:
             return
         n_init_points = self.get_xyz.shape[0]
@@ -2250,17 +2508,19 @@ class GaussianModel:
         # # else:
         # spread_mask = spatial_spread_mask
         selected_pts_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
-        if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
-            padded_grad_t = torch.zeros((n_init_points), device="cuda")
-            padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
-            selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
+        half_frame = 0.5 / 30.0
+        flat_radius_mask = self.get_temporal_flat_radius().squeeze(-1) >= half_frame
+        # if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
+        #     padded_grad_t = torch.zeros((n_init_points), device="cuda")
+        #     padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
+        #     selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
 
         if self.gaussian_dim == 4 and grads_spec_t is not None and grad_spec_t_threshold is not None:
             padded_grad_spec_t = torch.zeros((n_init_points), device="cuda")
             padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
-            min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (1 / 30 / 2)
             #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
             ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
             #ENV_RADIUS = 1.6
@@ -2271,9 +2531,15 @@ class GaussianModel:
             gs_in = torch.ones(xyz.shape[0], device="cuda")
             gs_in[outside_mask] = 0.0
             #min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
-            print("mask size", selected_pts_mask.sum(), min_scale_t_mask.sum(), gs_in.sum())
+            print("mask size", selected_pts_mask.sum(), flat_radius_mask.sum(), min_scale_t_mask.sum(), gs_in.sum())
+            selected_pts_mask = torch.logical_and(selected_pts_mask, flat_radius_mask)
             selected_pts_mask = torch.logical_and(selected_pts_mask, min_scale_t_mask)
             selected_pts_mask = torch.logical_and(selected_pts_mask, gs_in.bool())
+        if parent_exclusion_mask is not None:
+            exclusion_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
+            mask_count = min(parent_exclusion_mask.shape[0], n_init_points)
+            exclusion_mask[:mask_count] = parent_exclusion_mask[:mask_count]
+            selected_pts_mask = torch.logical_and(selected_pts_mask, ~exclusion_mask)
         # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
         print("densify_and_split_time: ", selected_pts_mask.sum())
         new_scaling = self.scaling_inverse_activation(self.get_scaling[selected_pts_mask].repeat(N,1))
@@ -2310,28 +2576,25 @@ class GaussianModel:
         means = torch.zeros((stds.size(0), 3),device=self.device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
-        xyzt = self.get_xyzt[selected_pts_mask]# + torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-        #new_xyz = new_xyzt[...,0:3]
-        #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_t = xyzt[...,3:4]
-        #new_scaling_t = torch.zeros_like(self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))) + torch.log(torch.tensor(0.4 * 20))
-        new_scaling_t = self.get_scaling_t[selected_pts_mask]
-        if new_scaling_t.numel() > 0:
-            print("max scaling_t before split: ", new_scaling_t.max())
-        new_t_before = new_t - 0.588 * new_scaling_t
-        new_t_after = new_t + 0.588 * new_scaling_t
-        # new_t_before = new_t - 0.5 * new_scaling_t
-        # new_t_after = new_t + 0.5 * new_scaling_t
-        new_t = torch.cat((new_t_before, new_t_after), dim=0)
-        new_xyz_before = self.get_xyz[selected_pts_mask] - 0.588 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        new_xyz_after = self.get_xyz[selected_pts_mask] + 0.588 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        # new_xyz_before = self.get_xyz[selected_pts_mask] - 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        # new_xyz_after = self.get_xyz[selected_pts_mask] + 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        new_xyz = torch.cat((new_xyz_before, new_xyz_after), dim=0)
-        new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask] * 0.501).repeat(N,1)
+        new_t, new_scaling_t, time_offsets, child_scaling_t = self.get_temporal_split_params(selected_pts_mask, N)
+        if child_scaling_t.numel() > 0:
+            print("max scaling_t before split: ", self.get_scaling_t[selected_pts_mask].max())
+            print("max scaling_t after split: ", child_scaling_t.max())
+        parent_xyz = self.get_xyz[selected_pts_mask].repeat(N, 1)
+        parent_velocity = self._velocity[selected_pts_mask].repeat(N, 1)
+        parent_sigma_t_fixed = self.get_sigma_t_fixed[selected_pts_mask]
+        new_xyz = parent_xyz + time_offsets * parent_velocity / parent_sigma_t_fixed.repeat(N, 1)
         #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
         #new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
         new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
+        if getattr(self, "temporal_opacity_mode", "normalized_sigmoid") == "flat_window":
+            child_flat_radius = self.get_temporal_flat_radius()[selected_pts_mask] / float(N)
+            new_velocity2[..., 0:1] = self.temporal_flat_radius_inverse_activation(child_flat_radius).repeat(N, 1)
+            #child_sigma_t_fixed = torch.clip(child_scaling_t ** 2 + child_flat_radius, min=1.0)
+            child_sigma_t_fixed = 1.0
+        else:
+            #child_sigma_t_fixed = torch.clip(child_scaling_t ** 2, min=1.0)
+            child_sigma_t_fixed = 1.0
         new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
         new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
         # new_specular = self._specular[selected_pts_mask].repeat(N,1)
@@ -2351,7 +2614,7 @@ class GaussianModel:
         new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
         new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
         #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
-        new_velocity = (self._velocity[selected_pts_mask] * (torch.clip((self.get_scaling_t[selected_pts_mask] * 0.501)**2, min=1.0) + 1) / (self.get_sigma_t_fixed[selected_pts_mask] + 1)).repeat(N,1)
+        new_velocity = (self._velocity[selected_pts_mask] * child_sigma_t_fixed / parent_sigma_t_fixed).repeat(N,1)
         # new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
         # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
         #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
@@ -2359,7 +2622,10 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        if defer_prune:
+            return prune_filter
         self.prune_points(prune_filter)
+        return None
 
     def densify_and_split_time3(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=3):
         if grad_spec_t_threshold is None:
@@ -2388,8 +2654,7 @@ class GaussianModel:
             padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
-            # min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.3, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
-            min_scale_t_mask = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * self.get_sigma_t).squeeze(-1) > (1 / 30 / 2)
+            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (1 / 30 / 2)
             print("mask size", selected_pts_mask.sum(), min_scale_t_mask.sum())
             selected_pts_mask = torch.logical_and(selected_pts_mask, min_scale_t_mask)
         # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
@@ -2428,23 +2693,21 @@ class GaussianModel:
         means = torch.zeros((stds.size(0), 3),device=self.device)
         samples = torch.normal(mean=means, std=stds)
         rots = build_rotation(self._rotation[selected_pts_mask]).repeat(N,1,1)
-        xyzt = self.get_xyzt[selected_pts_mask]# + torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1)
-        #new_xyz = new_xyzt[...,0:3]
-        #new_xyz = torch.bmm(rots, samples.unsqueeze(-1)).squeeze(-1) + self.get_xyz[selected_pts_mask].repeat(N, 1)
-        new_t = xyzt[...,3:4]
-        #new_scaling_t = torch.zeros_like(self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))) + torch.log(torch.tensor(0.4 * 20))
-        new_scaling_t = self.get_scaling_t[selected_pts_mask]
-        new_t_before = new_t - 0.5 * new_scaling_t
-        new_t_middle = new_t
-        new_t_after = new_t + 0.5 * new_scaling_t
-        new_t = torch.cat((new_t_before, new_t_middle, new_t_after), dim=0)
-        new_xyz_before = self.get_xyz[selected_pts_mask] - 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        new_xyz_middle = self.get_xyz[selected_pts_mask]
-        new_xyz_after = self.get_xyz[selected_pts_mask] + 0.5 * new_scaling_t * self._velocity[selected_pts_mask] / (self.get_sigma_t[selected_pts_mask] + 1)
-        new_xyz = torch.cat((new_xyz_before, new_xyz_middle, new_xyz_after), dim=0)
-        new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask] / 2).repeat(N,1)
+        new_t, new_scaling_t, time_offsets, child_scaling_t = self.get_temporal_split_params(selected_pts_mask, N)
+        parent_xyz = self.get_xyz[selected_pts_mask].repeat(N, 1)
+        parent_velocity = self._velocity[selected_pts_mask].repeat(N, 1)
+        parent_sigma_t_fixed = self.get_sigma_t_fixed[selected_pts_mask]
+        new_xyz = parent_xyz + time_offsets * parent_velocity / parent_sigma_t_fixed.repeat(N, 1)
         #new_velocity = torch.zeros_like(self._velocity[selected_pts_mask].repeat(N,1))
-        new_velocity2 = torch.zeros_like(self._velocity2[selected_pts_mask].repeat(N,1))
+        new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
+        if getattr(self, "temporal_opacity_mode", "normalized_sigmoid") == "flat_window":
+            child_flat_radius = self.get_temporal_flat_radius()[selected_pts_mask] / float(N)
+            new_velocity2[..., 0:1] = self.temporal_flat_radius_inverse_activation(child_flat_radius).repeat(N, 1)
+            #child_sigma_t_fixed = torch.clip(child_scaling_t ** 2 + child_flat_radius, min=1.0)
+            child_sigma_t_fixed = 1.0
+        else:
+            #child_sigma_t_fixed = torch.clip(child_scaling_t ** 2, min=1.0)
+            child_sigma_t_fixed = 1.0
         new_velocity3 = torch.zeros_like(self._velocity3[selected_pts_mask].repeat(N,1))
         new_rot_velocity = torch.zeros_like(self._rot_velocity[selected_pts_mask].repeat(N, 1))
         new_specular = self._specular[selected_pts_mask].repeat(N,1)
@@ -2453,7 +2716,7 @@ class GaussianModel:
         new_delta_normal = self._delta_normal[selected_pts_mask].repeat(N,1)
         new_roughness = self._roughness[selected_pts_mask].repeat(N,1)
         #new_scaling_t = self.scaling_inverse_activation(self.get_scaling_t[selected_pts_mask].repeat(N,1))
-        new_velocity = (self._velocity[selected_pts_mask] * ((self.get_scaling_t[selected_pts_mask] / 2)**2 + 1)/ (self.get_sigma_t[selected_pts_mask] + 1)).repeat(N,1)
+        new_velocity = (self._velocity[selected_pts_mask] * child_sigma_t_fixed / parent_sigma_t_fixed).repeat(N,1)
         # new_velocity2 = self._velocity2[selected_pts_mask].repeat(N,1)
         # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
         #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
@@ -2463,7 +2726,7 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask, N=2):
+    def densify_and_split(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask, N=2, defer_prune=False):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -2561,7 +2824,10 @@ class GaussianModel:
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
+        if defer_prune:
+            return prune_filter
         self.prune_points(prune_filter)
+        return None
 
     def densify_and_clone(self, grads, grad_threshold, scene_extent, grads_t, grad_t_threshold, inside_mask, outside_mask, low_opa=True):
         # Extract points that satisfy the gradient condition
@@ -2615,7 +2881,7 @@ class GaussianModel:
 
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False):
         #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
         ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
         #ENV_RADIUS = 1.6
@@ -2632,6 +2898,18 @@ class GaussianModel:
         
         # padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
         # padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+
+        deferred_prune_filter = None
+
+        def merge_prune_filters(*filters):
+            valid_filters = [mask for mask in filters if mask is not None]
+            if not valid_filters:
+                return None
+            merged = torch.zeros((self.get_xyz.shape[0]), device="cuda", dtype=torch.bool)
+            for mask in valid_filters:
+                mask_count = min(mask.shape[0], merged.shape[0])
+                merged[:mask_count] = torch.logical_or(merged[:mask_count], mask[:mask_count])
+            return merged
 
         if not prune_only:
             grads = self.xyz_gradient_accum / self.denom
@@ -2655,32 +2933,38 @@ class GaussianModel:
                     # max_grad_t = 1.0
             else:
                 grads_t = None
-            if iteration <= 30000:
+            spatial_prune_filter = None
+            temporal_prune_filter = None
+            if not split_time:
                 if iteration < 9000:
                     self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask)
                 else:
                     self.densify_and_clone(grads, max_grad, extent, grads_t, max_grad_t, gs_in, outside_mask, low_opa=False)
-                self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask)
+                spatial_prune_filter = self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask, defer_prune=True)
             #self.densify_and_split_time3(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
-            self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
+            else:
+                temporal_prune_filter = self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad, defer_prune=True)
+            deferred_prune_filter = merge_prune_filters(spatial_prune_filter, temporal_prune_filter)
 
         #prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if iteration < 30000:
-            if not disable_prune:
-                n_init_points = self.get_xyz.shape[0]
-                padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
-                padded_inside_mask[:gs_in.shape[0]] = gs_in
-                
-                padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
-                padded_outside_mask[:outside_mask.shape[0]] = outside_mask
-                prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
-                if max_screen_size:
-                    big_points_vs = self.max_radii2D > max_screen_size
-                    big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-                    prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-            else:
-                prune_mask = torch.zeros_like(self.get_opacity.squeeze(), dtype=torch.bool)
-            self.prune_points(prune_mask)
+        if not disable_prune:
+            n_init_points = self.get_xyz.shape[0]
+            padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            padded_inside_mask[:gs_in.shape[0]] = gs_in
+
+            padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+            prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
+            if max_screen_size:
+                big_points_vs = self.max_radii2D > max_screen_size
+                big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
+                prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+        else:
+            prune_mask = torch.zeros_like(self.get_opacity.squeeze(), dtype=torch.bool)
+        deferred_prune_filter = merge_prune_filters(deferred_prune_filter)
+        if deferred_prune_filter is not None:
+            prune_mask = torch.logical_or(prune_mask, deferred_prune_filter)
+        self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
 

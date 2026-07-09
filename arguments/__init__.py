@@ -58,6 +58,7 @@ class ModelParams(ParamGroup):
         self.num_extra_pts = 0
         self.loaded_pth = ""
         self.frame_ratio = 1
+        self.frame_filter = ""
         self.dataloader = False
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -75,6 +76,9 @@ class PipelineParams(ParamGroup):
         self.env_optimize_until = 1000000000
         self.env_optimize_from = 0
         self.eval_shfs_4d = False
+        self.temporal_opacity_mode = "normalized_sigmoid"
+        self.temporal_flat_radius_mult = 0.75
+        self.temporal_flat_edge_sigma_mult = 2.0
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -101,6 +105,10 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
+        self.velocity2_lr_init = -1.0
+        self.velocity2_lr_final = -1.0
+        self.velocity2_lr_delay_mult = -1.0
+        self.velocity2_lr_max_steps = -1
         self.specular_lr = 0.0001
         self.albedo_lr = 0.001
         self.delta_normal_lr = 0.001
@@ -117,6 +125,27 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
         self.densify_grad_t_threshold = 0.002
         self.densify_specular_time_threshold = 0.0000003
+        self.temporal_split_from_iter = 25_000
+        self.temporal_split_until_iter = 35_000
+        self.opacity_zero_reset_iter = -1
+        self.opacity_zero_reset_value = 1.0e-6
+        self.opacity_periodic_reset_interval = -1
+        self.opacity_periodic_reset_value = 0.1
+        self.opacity_periodic_reset_from_iter = 20_000
+        self.opacity_periodic_reset_until_iter = -1
+        self.temporal_opacity_k_start = 2.0
+        self.temporal_opacity_k_final = 12.0
+        self.temporal_opacity_k_ramp_start = 25_000
+        self.temporal_opacity_k_ramp_end = 45_000
+        self.temporal_opacity_k_loss_weight = 0.01
+        self.temporal_flat_range_level = 0.05
+        # Legacy config keys kept for compatibility; flat_window now uses a learned per-Gaussian radius.
+        self.temporal_flat_radius_start_mult = 0.0
+        self.temporal_flat_radius_final_mult = 0.75
+        self.temporal_flat_radius_ramp_start = 25_000
+        self.temporal_flat_radius_ramp_end = 35_000
+        self.temporal_flat_radius_loss_weight = 0.0
+        self.train_num_workers = -1
         self.densify_until_num_points = -1
         self.final_prune_from_iter = -1
         self.sh_increase_interval = 1000

@@ -483,6 +483,7 @@ def render_3d_pgsr_anti(
     iteration = 0,
     timestamp = None,
     local_feature_start_iter = 0,
+    return_mlp_debug = False,
 
 ):
     means3D = xyz
@@ -551,11 +552,12 @@ def render_3d_pgsr_anti(
     if local_pc is None:
         local_pc = pc
 
-    xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / (pc.get_sigma_t + 1)
+    xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / pc.get_sigma_t_fixed
     view_pos = viewpoint_camera.camera_center
     diffuse = pc.get_diffuse(dir_pp)
     rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
     rgb = torch.clamp_min(rgb + 0.5, 0.0)
+    #rgb = torch.clamp_min(rgb + 0.5, -torch.log(torch.tensor(5.0, device=rgb.device)))
     #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
     ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
     #ENV_RADIUS = 1.6
@@ -572,7 +574,7 @@ def render_3d_pgsr_anti(
     specular2 = pc.get_specular2
 
     if local_pc.gaussian_dim == 4:
-        local_xyz = local_pc.get_xyz + local_pc.get_velocity * (viewpoint_camera.timestamp - local_pc.get_t) / (local_pc.get_sigma_t_fixed + 1)
+        local_xyz = local_pc.get_xyz + local_pc.get_velocity * (viewpoint_camera.timestamp - local_pc.get_t) / local_pc.get_sigma_t_fixed
         local_mt = local_pc.get_marginal_t(timestamp=viewpoint_camera.timestamp)
         local_opacity = local_pc.get_opacity * local_mt
         if local_mask is None:
@@ -616,7 +618,7 @@ def render_3d_pgsr_anti(
         colors_precomp = color.squeeze() 
         shs = None
     else:
-        color[~outside_mask] = diffuse[~outside_mask]
+        color[~outside_mask] = albedo[~outside_mask]
         color[outside_mask] = rgb[outside_mask]
         colors_precomp = color.squeeze() 
         shs = None
@@ -873,6 +875,7 @@ def render_3d_pgsr_anti(
     spec_rgb = None
     spec_rgb_global = None
     spec_rgb_local = None
+    mlp_debug_maps = None
     mix_weight_map = None
     with torch.no_grad():
         select_mask = rendered_in.reshape(-1,) > 0.05
@@ -891,9 +894,9 @@ def render_3d_pgsr_anti(
         T = torch.tensor(viewpoint_camera.T, dtype=torch.float32, device='cuda')
         #print(rendered_global_normal.size())
         if iteration < 50000000:
-            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.pixel_camera)
+            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal, viewpoint_camera.get_pixel_camera())
         else:
-            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal_adjusted, viewpoint_camera.pixel_camera)
+            reflec_dir, rays_d = get_refl_dir(HWK, R, T, rendered_global_normal_adjusted, viewpoint_camera.get_pixel_camera())
         reflec_dir_selected = reflec_dir.reshape(-1, 3)[select_index]
 
         # rendered_global_normal_tp = (cart2sph(rendered_global_normal.reshape(-1, 3)[..., [2,0,1]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
@@ -998,12 +1001,30 @@ def render_3d_pgsr_anti(
         else:
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
             mlp_output_base = torch.zeros_like(mlp_output)
-        spec_light = torch.exp(torch.clamp(mlp_output + mlp_output_base, max=5.0))
+        mlp_output_sum = mlp_output + mlp_output_base
+        spec_light = torch.exp(torch.clamp(mlp_output_sum, max=5.0))
         #spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
         spec_rgb.reshape(-1, 3)[select_index] = spec_light
         spec_rgb = spec_rgb.permute(2, 0, 1)
+
+        if return_mlp_debug:
+            def make_mlp_debug_map(values):
+                debug_map = torch.full(
+                    (viewpoint_camera.H, viewpoint_camera.W, 3),
+                    float("nan"),
+                    dtype=values.dtype,
+                    device=values.device,
+                )
+                debug_map.reshape(-1, 3)[select_index] = values
+                return debug_map.permute(2, 0, 1)
+
+            mlp_debug_maps = {
+                "mlp_output": make_mlp_debug_map(mlp_output),
+                "mlp_output_base": make_mlp_debug_map(mlp_output_base),
+                "mlp_output_sum": make_mlp_debug_map(mlp_output_sum),
+            }
 
         
 
@@ -1053,6 +1074,7 @@ def render_3d_pgsr_anti(
                     "local_feature_map": local_feature_map.reshape(viewpoint_camera.H, viewpoint_camera.W, 4).permute(2,0,1),
                     "spec_coeff": spec_coeff,
                     "spec_rgb": spec_rgb if spec_rgb is not None else None,
+                    "mlp_debug": mlp_debug_maps,
                     "spec_rgb_global": spec_rgb_global,
                     "spec_rgb_local": spec_rgb_local,
                     "mix_weight": mix_weight_map,

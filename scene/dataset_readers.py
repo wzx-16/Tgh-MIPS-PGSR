@@ -47,6 +47,33 @@ class CameraInfo(NamedTuple):
     cx: float = -1.0
     cy: float = -1.0
 
+
+
+def _parse_frame_filter(frame_filter):
+    if frame_filter is None or frame_filter == "":
+        return None
+    if isinstance(frame_filter, (list, tuple, set)):
+        return {int(value) for value in frame_filter}
+    frames = set()
+    for part in str(frame_filter).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            frames.update(range(int(start), int(end) + 1))
+        else:
+            frames.add(int(part))
+    return frames
+
+
+def _frame_from_image_name(image_name):
+    token = Path(str(image_name)).stem.rsplit("_", 1)[-1]
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
 class SceneInfo(NamedTuple):
     point_cloud: BasicPointCloud
     train_cameras: list
@@ -248,7 +275,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8, num_pts_ratio=1.0):
                            ply_path=ply_path)
     return scene_info
 
-def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png", time_duration=None, frame_ratio=1, dataloader=False):
+def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png", time_duration=None, frame_ratio=1, dataloader=False, frame_filter=None):
     cam_infos = []
 
     with open(os.path.join(path, transformsfile)) as json_file:
@@ -257,18 +284,24 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
         fovx = contents["camera_angle_x"]
         
     frames = contents["frames"]
+    frame_filter_set = _parse_frame_filter(frame_filter)
     tbar = tqdm(range(len(frames)))
     def frame_read_fn(idx_frame):
         idx = idx_frame[0]
         frame = idx_frame[1]
+        cam_name = os.path.join(path, frame["file_path"] + extension)
+        image_name = Path(cam_name).stem
+        if frame_filter_set is not None:
+            frame_id = _frame_from_image_name(image_name)
+            if frame_id not in frame_filter_set:
+                return
+
         timestamp = frame.get('time', 0.0)
         if frame_ratio > 1:
             timestamp /= frame_ratio
         if time_duration is not None and 'time' in frame:
             if timestamp < time_duration[0] or timestamp > time_duration[1]:
                 return
-
-        cam_name = os.path.join(path, frame["file_path"] + extension)
 
         # NeRF 'transform_matrix' is a camera-to-world transform
         c2w = np.array(frame["transform_matrix"])
@@ -281,7 +314,6 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
         T = w2c[:3, 3]
 
         image_path = os.path.join(path, cam_name) # .replace('hdImgs_unditorted', 'hdImgs_unditorted_rgba').replace('.jpg', '.png')
-        image_name = Path(cam_name).stem
         #loaded_mask = None
         if not dataloader:
             with Image.open(image_path) as image_load:
@@ -357,12 +389,12 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
     
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False, render=False):
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False, render=False, frame_filter=None):
     
     print("Reading Training Transforms")
-    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader)
+    train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader, frame_filter=frame_filter)
     print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json" if not path.endswith('lego') else "transforms_val.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader)
+    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json" if not path.endswith('lego') else "transforms_val.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader, frame_filter=frame_filter)
     
     if not eval:
         train_cam_infos.extend(test_cam_infos)

@@ -1,6 +1,6 @@
 gaussian_dim: 4
 time_duration: [0.0, 10.0]
-num_pts: 1000_000
+num_pts: 200_000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: True
@@ -34,7 +34,7 @@ PipelineParams:
   temporal_flat_radius_mult: 1.0
 
 OptimizationParams:
-  iterations: 80_000
+  iterations: 75_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032
@@ -46,12 +46,8 @@ OptimizationParams:
   brdf_mlp_lr_max_steps : 80_000
   feature_lr: 0.002
   opacity_lr: 0.05
-  scaling_lr: 0.003
+  scaling_lr: 0.005
   rotation_lr: 0.001
-  velocity2_lr_init: 0.001
-  velocity2_lr_final: 0.001
-  velocity2_lr_delay_mult: 1.0
-  velocity2_lr_max_steps: 80_000
   specular_lr : 0.00005
   albedo_lr : 0.001
   delta_normal_lr : 0.001
@@ -67,23 +63,22 @@ OptimizationParams:
   # densify_until_iter2: 20_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
-  temporal_split_from_iter: 30_000
-  temporal_split_until_iter: 40_000
-  opacity_zero_reset_iter: 20000
-  opacity_zero_reset_value: 0.5
-  opacity_periodic_reset_interval: -1
+  temporal_split_from_iter: 25_000
+  temporal_split_until_iter: 45_000
+  opacity_zero_reset_iter: 35_000
+  opacity_zero_reset_value: 0.1
+  opacity_periodic_reset_interval: 20_000
   opacity_periodic_reset_value: 0.1
   opacity_periodic_reset_from_iter: 20_000
-  opacity_periodic_reset_until_iter: 40_000
   temporal_opacity_k_start: 2.0
   temporal_opacity_k_final: 12.0
   temporal_opacity_k_ramp_start: 25_000
-  temporal_opacity_k_ramp_end: 40_000
+  temporal_opacity_k_ramp_end: 45_000
   temporal_opacity_k_loss_weight: 0.01
   temporal_flat_radius_start_mult: 0.0
   temporal_flat_radius_final_mult: 0.75
   temporal_flat_radius_ramp_start: 25_000
-  temporal_flat_radius_ramp_end: 40_000
+  temporal_flat_radius_ramp_end: 45_000
   temporal_flat_radius_loss_weight: 0.05
   train_num_workers: 0
   densify_until_num_points: -1

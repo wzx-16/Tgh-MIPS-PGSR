@@ -74,6 +74,12 @@ def _clone_tensor_attr(src_tensor):
         return nn.Parameter(cloned.requires_grad_(True))
     return cloned
 
+
+def _split_gaussian_checkpoint_payload(payload):
+    if isinstance(payload, dict) and "gaussians" in payload:
+        return payload["gaussians"], payload.get("local_gaussians")
+    return payload, None
+
 def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel, training_args=None):
     local_model.gsdim = global_model.gsdim
     local_model.active_sh_degree = global_model.active_sh_degree
@@ -86,6 +92,9 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
     local_model.gaussian_dim = global_model.gaussian_dim
     local_model.force_sh_3d = global_model.force_sh_3d
     local_model.time_duration = global_model.time_duration
+    local_model.temporal_opacity_mode = global_model.temporal_opacity_mode
+    local_model.temporal_flat_radius_mult = global_model.temporal_flat_radius_mult
+    local_model.temporal_flat_edge_sigma_mult = global_model.temporal_flat_edge_sigma_mult
 
     tensor_attrs = [
         "_xyz", "_features_dc", "_features_rest", "_scaling", "_rotation", "_opacity",
@@ -108,6 +117,11 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
             local_model.init_light_env()
         local_model.training_setup(training_args)
 
+def setup_restored_local_gaussian_model(local_model: GaussianModel, training_args):
+    if local_model.brdf_mlp is None or local_model.light_mlp is None or local_model.light_mlp_2 is None or local_model.dir_encoding is None:
+        local_model.init_light_env()
+    local_model.training_setup(training_args)
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
              gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id):
     
@@ -124,6 +138,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #     print("sanity conv OK:", y.shape)
     #torch.autograd.set_detect_anomaly(True)
     print("id ", id)
+    os.makedirs(f"./test{id}", exist_ok=True)
+    os.makedirs(f"./test_feature{id}", exist_ok=True)
     if dataset.frame_ratio > 1:
         time_duration = [time_duration[0] / dataset.frame_ratio,  time_duration[1] / dataset.frame_ratio]
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -132,23 +148,70 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device=device, opt=opt)
     gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
     local_gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=gaussian_dim, time_duration=time_duration, rot_4d=rot_4d, force_sh_3d=force_sh_3d, sh_degree_t=2 if pipe.eval_shfs_4d else 0, device='cuda')
+    gaussians.temporal_opacity_mode = pipe.temporal_opacity_mode
+    gaussians.temporal_flat_radius_mult = pipe.temporal_flat_radius_mult
+    gaussians.temporal_flat_edge_sigma_mult = pipe.temporal_flat_edge_sigma_mult
+    local_gaussians.temporal_opacity_mode = pipe.temporal_opacity_mode
+    local_gaussians.temporal_flat_radius_mult = pipe.temporal_flat_radius_mult
+    local_gaussians.temporal_flat_edge_sigma_mult = pipe.temporal_flat_edge_sigma_mult
+    print("Temporal opacity mode:", pipe.temporal_opacity_mode)
+    print("Temporal flat legacy args:", pipe.temporal_flat_radius_mult, pipe.temporal_flat_edge_sigma_mult)
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
+    opacity_zero_reset_iter = getattr(opt, "opacity_zero_reset_iter", -1)
+    opacity_zero_reset_value = getattr(opt, "opacity_zero_reset_value", 1.0e-6)
+    opacity_zero_reset_done = False
+    opacity_periodic_reset_interval = getattr(opt, "opacity_periodic_reset_interval", -1)
+    opacity_periodic_reset_value = getattr(opt, "opacity_periodic_reset_value", 0.1)
+    opacity_periodic_reset_from_iter = getattr(opt, "opacity_periodic_reset_from_iter", 20_000)
+    opacity_periodic_reset_until_iter = getattr(opt, "opacity_periodic_reset_until_iter", -1)
+    lighting_start_iter = 9000
+    albedo_sh_reset_done = False
+
+    def should_periodic_opacity_reset(current_iter):
+        return (
+            opacity_periodic_reset_interval > 0
+            and current_iter >= opacity_periodic_reset_from_iter
+            and (opacity_periodic_reset_until_iter < 0 or current_iter <= opacity_periodic_reset_until_iter)
+            and current_iter < opt.iterations
+            and current_iter % opacity_periodic_reset_interval == 0
+        )
     
     #checkpoint = './output/N3V/tao/tgh_chkpnt5000.pth'
     
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
+        (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
+        model_params, local_model_params = _split_gaussian_checkpoint_payload(model_params)
         gaussians.restore(model_params, opt)
-        scene.tgh.create_from_gaussians(gaussians)
-        gaussian_init_flag = True
-        initialize_local_gaussian_model(gaussians, local_gaussians, opt)
+        gaussian_init_flag = False
+        if opacity_zero_reset_iter >= 0 and first_iter == opacity_zero_reset_iter:
+            print(f"[ITER {first_iter}] Resetting global Gaussian opacity to {opacity_zero_reset_value}")
+            gaussians.reset_opacity_zero(opacity_zero_reset_value)
+            opacity_zero_reset_done = True
+        if should_periodic_opacity_reset(first_iter):
+            print(f"[ITER {first_iter}] Periodic global opacity reset to {opacity_periodic_reset_value} on resume")
+            gaussians.reset_opacity_zero(opacity_periodic_reset_value)
+        if first_iter >= lighting_start_iter:
+            if gaussians._albedo.numel() > 0 and gaussians._albedo.detach().abs().max().item() < 1.0e-8:
+                print(f"[ITER {first_iter}] Initializing albedo from SH on resume")
+                gaussians.reset_albedo_from_sh()
+            albedo_sh_reset_done = True
+        if local_model_params is not None:
+            local_gaussians.restore(local_model_params, opt)
+            scene.local_gaussians_loaded = True
+            print("Using embedded local Gaussian checkpoint.")
+        elif not getattr(scene, "local_gaussians_loaded", False):
+            initialize_local_gaussian_model(gaussians, local_gaussians, opt)
+        else:
+            setup_restored_local_gaussian_model(local_gaussians, opt)
+            print("Using restored local Gaussian checkpoint.")
     else:
         gaussian_init_flag = False
         gaussians.training_setup(opt)
         if not getattr(scene, "local_gaussians_loaded", False):
             initialize_local_gaussian_model(gaussians, local_gaussians, opt)
         else:
+            setup_restored_local_gaussian_model(local_gaussians, opt)
             print("Using restored local Gaussian checkpoint.")
     #print("test5")
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -179,7 +242,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #scene.tgh.create_from_gaussians(gaussians, opt)
     # gaussian_init_flag = False
     training_dataset = scene.getTrainCameras()
-    training_dataloader = DataLoader(training_dataset, batch_size=batch_size, shuffle=True, num_workers=12 if dataset.dataloader else 0, collate_fn=lambda x: x, drop_last=True, pin_memory=True)
+    train_num_workers = getattr(opt, "train_num_workers", -1)
+    if train_num_workers < 0:
+        train_num_workers = 12 if dataset.dataloader else 0
+    print("Training dataloader workers:", train_num_workers)
+    training_dataloader = DataLoader(
+        training_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=train_num_workers,
+        collate_fn=lambda x: x,
+        drop_last=True,
+        pin_memory=True,
+    )
     #print("test6")
     iteration = first_iter
     fn_lpips = lpips.LPIPS(net='alex').cuda().eval()
@@ -210,7 +285,36 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #     return total/area
     #print("test7")
     densification_interval = opt.densification_interval
+    temporal_split_from_iter = getattr(opt, "temporal_split_from_iter", 25000)
+    temporal_split_until_iter = getattr(opt, "temporal_split_until_iter", opt.densify_until_iter)
     local_feature_start_iter = 12000
+    temporal_opacity_k_start = getattr(opt, "temporal_opacity_k_start", 2.0)
+    temporal_opacity_k_final = getattr(opt, "temporal_opacity_k_final", 12.0)
+    temporal_opacity_k_ramp_start = getattr(opt, "temporal_opacity_k_ramp_start", temporal_split_from_iter)
+    temporal_opacity_k_ramp_end = getattr(opt, "temporal_opacity_k_ramp_end", temporal_split_until_iter)
+    temporal_opacity_k_loss_weight = getattr(opt, "temporal_opacity_k_loss_weight", 0.01)
+    gaussians.temporal_flat_range_level = getattr(opt, "temporal_flat_range_level", 0.05)
+    if pipe.temporal_opacity_mode == "flat_window":
+        print("Temporal flat window uses scaling_t as edge sigma and velocity2[..., 0] as learned flat radius.")
+    else:
+        print("Temporal k schedule:", temporal_opacity_k_start, temporal_opacity_k_final, temporal_opacity_k_ramp_start, temporal_opacity_k_ramp_end)
+
+    def linear_schedule_value(start_value, final_value, ramp_start, ramp_end, current_iter):
+        if ramp_end <= ramp_start:
+            ramp = 1.0 if current_iter >= ramp_end else 0.0
+        else:
+            ramp = min(1.0, max(0.0, (current_iter - ramp_start) / (ramp_end - ramp_start)))
+        return start_value + (final_value - start_value) * ramp
+
+    def get_temporal_opacity_target_k(current_iter):
+        return linear_schedule_value(
+            temporal_opacity_k_start,
+            temporal_opacity_k_final,
+            temporal_opacity_k_ramp_start,
+            temporal_opacity_k_ramp_end,
+            current_iter,
+        )
+
     while iteration < opt.iterations + 1:
         if iteration <= 3000:
             densification_interval = 100
@@ -223,10 +327,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         elif iteration < 35000:
             densification_interval = 1000
         else:
-            densification_interval = 2000
+            densification_interval = 1000
         for batch_data in training_dataloader:
             #train_start = time.time()
             iteration += 1
+            gaussians.temporal_schedule_iteration = iteration
             # if iteration > 20:
             #     exit()
 
@@ -238,7 +343,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if iteration % opt.sh_increase_interval == 0:
                 gaussians.oneupSHdegree()
                 local_gaussians.oneupSHdegree()
-            
+
+            if not albedo_sh_reset_done and iteration >= lighting_start_iter:
+                print(f"\n[ITER {iteration}] Initializing albedo from SH for lighting")
+                gaussians.reset_albedo_from_sh()
+                albedo_sh_reset_done = True
+
 
             # Render
             if (iteration - 1) == debug_from:
@@ -337,17 +447,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     xyz = gaussians.get_xyz.detach() + gaussians.get_velocity.detach() * time_range / (gaussians.get_sigma_t + 1)
                 # else:
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t + 1)
-                xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / (gaussians.get_sigma_t_fixed + 1)
+                xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / gaussians.get_sigma_t_fixed
                 #xyz = gaussians.get_xyz + gaussians.get_velocity * time_range
                 # if iteration >= 3000 and iteration < 5000:
                 #     xyz = xyz.detach()
                 #xyz = gaussians.get_xyz + (gaussians.get_velocity * time_range + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3) / (gaussians.get_sigma_t + 1)# + gaussians.get_velocity2 * time_range2 + gaussians.get_velocity3 * time_range3
                 #rot = gaussians.get_rotation + gaussians.get_rot_velocity * (viewpoint_cam.timestamp - gaussians.get_t)
                 # xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t.detach() + 1)
-                mt = gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
-                scaler = (torch.sigmoid(0.5 * (gaussians.get_velocity2[..., 0:1])) - torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1])))
-                min_opa = torch.sigmoid(-0.5 * (gaussians.get_velocity2[..., 0:1]))
-                mt = (torch.sigmoid((mt - 0.5) * (gaussians.get_velocity2[..., 0:1])) - min_opa) / scaler
+                mt = gaussians.get_temporal_opacity_factor(timestamp=viewpoint_cam.timestamp)
                 #mt = torch.sigmoid((mt - 0.5) * 14)
                 # print("mt size and specular size", mt.shape, gaussians.get_specular[..., 0:1].shape)
                 # print("specular max", gaussians.get_specular[..., 0:1].max())
@@ -486,7 +593,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # loss += 0.1 * ((1 - spec_coeff).mean())
                 weight_conf = 1.0 - get_img_grad_weight(gt_image)
                 decay_weight = get_decay_weight(15000, 30000, iteration)
-                if iteration < 30000:
+                if iteration < 40000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -520,7 +627,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     render_depth = render_pkg["depth"]
                     render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
                     torchvision.utils.save_image(render_depth_image, "render_depth.png")
-                if iteration < 15000:
+                if iteration < 20000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -650,27 +757,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     loss = loss + opt.lambda_motion * Lmotion
                 # ########################
                 #loss += 0.1 * (gaussians.get_scaling[visibility_filter] - 0.2).clip(min=0.0).sum()
-                # _, cov_t = gaussians.get_current_cov_and_mean_t()
-                cov_t = gaussians.get_sigma_t
-                #effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
-                # min_opa_inversigmoid = torch.log(torch.tensor(0.05, device="cuda") / (1 - 0.05)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
-                # high_opa_inversigmoid = torch.log(torch.tensor(0.95, device="cuda") / (1 - 0.95)) / (14 + gaussians.get_specular.detach()[..., 0:1]) + 0.5
-
-                min_effect_opa = inverse_sigmoid(0.05 * scaler + min_opa) / gaussians.get_velocity2[..., 0:1] + 0.5
-                max_effect_opa = inverse_sigmoid(0.95 * scaler + min_opa) / gaussians.get_velocity2[..., 0:1] + 0.5
-
-                # effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.05, device="cuda")) * cov_t)
-                # high_opa_effect_range = torch.sqrt(-2 * torch.log(torch.tensor(0.95, device="cuda")) * cov_t)
-                # effect_range = torch.sqrt(-2 * torch.log(min_opa_inversigmoid) * cov_t)
-                # high_opa_effect_range = torch.sqrt(-2 * torch.log(high_opa_inversigmoid) * cov_t)
-
-                effect_range = torch.sqrt(-2 * torch.log(min_effect_opa) * cov_t)
-                high_opa_effect_range = torch.sqrt(-2 * torch.log(max_effect_opa) * cov_t)
+                effect_range = gaussians.get_temporal_range_for_opacity(0.05)
+                edge_effect_range = None
+                if pipe.temporal_opacity_mode == "flat_window":
+                    flat_radius = gaussians.get_temporal_flat_radius()
+                    high_opa_effect_range = flat_radius
+                    edge_effect_range = gaussians.get_temporal_edge_sigma() * math.sqrt(-2.0 * math.log(0.05))
+                else:
+                    high_opa_effect_range = gaussians.get_temporal_range_for_opacity(0.95)
 
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
                 loss += 0.01 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
-                loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0).mean()
+                high_opa_penalty = torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0)
+                loss += high_opa_penalty.mean()
+                if edge_effect_range is not None:
+                    loss += 0.05 * torch.clip(edge_effect_range - 1/30/2, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 6, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 2, min=0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
@@ -790,7 +892,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2):
                     #delta_normal_grad = get_img_grad_weight_avg(rendered_delta_normal)
                     #loss += 0.01 * delta_normal_grad.mean()
-                    if (iteration > opt.densify_from_iter and iteration <= 30000):
+                    if (iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter):
                         #pass
                         # ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
                         # ENV_RADIUS = 8
@@ -799,21 +901,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # gs_in[outside_mask] = 0.0
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
-                        loss += 0.02 * gaussians.get_opacity[visibility_filter].mean()
+                        if iteration < 30000:
+                            loss += 0.02 * gaussians.get_opacity[visibility_filter].mean()
+                        # elif iteration < 40000:
+                        #     loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
                     if iteration > 15000:
                         # pass
                         local_opa = local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()
                         loss += 0.01 * safe_mean(local_opa)
                         #loss += 0.001 * gaussians.get_opacity.mean()
-                    # density_loss = entropy_loss(opacity[visibility_filter])
-                    density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
+                    density_loss = entropy_loss(opacity[visibility_filter])
+                    # density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
                     if iteration > 3000:
                         #pass
                         loss += density_loss * 0.01
                         #loss += -gaussians._velocity2[visibility_filter].mean() * 0.02
-                        target_k = 4.0 + 10.0 * min(1.0, max(0.0, (iteration - 15000) / 15000))
+                    if pipe.temporal_opacity_mode != "flat_window":
+                        target_k = get_temporal_opacity_target_k(iteration)
                         k = gaussians.get_velocity2[..., 0:1]
-                        loss += 0.01 * ((k[visibility_filter] - target_k) ** 2).mean()
+                        loss += temporal_opacity_k_loss_weight * safe_mean((k[visibility_filter] - target_k) ** 2)
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
                 loss = loss / batch_size
@@ -890,7 +996,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         "Lssim": Lssim}
             if iteration % 100 == 0:
                 velocity2 = gaussians.get_velocity2
-                print_tensor_distribution("velocity2[..., 0]", velocity2[..., 0:1])
+                if pipe.temporal_opacity_mode == "flat_window":
+                    print_tensor_distribution("edge_sigma", gaussians.get_temporal_edge_sigma())
+                    print_tensor_distribution("flat_radius", gaussians.get_temporal_flat_radius())
+                    print_tensor_distribution("flat_ratio", gaussians.get_temporal_flat_ratio(0.05))
+                else:
+                    print_tensor_distribution("velocity2[..., 0]", velocity2[..., 0:1])
+                    print("temporal targets:", get_temporal_opacity_target_k(iteration))
             with torch.no_grad():
                 #optimizer_start = time.time()
                 psnr_for_log = psnr(image, gt_image).mean()
@@ -929,13 +1041,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #         print("\n[ITER {}] Saving best checkpoint".format(iteration))
                 #         torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt_best.pth")
                 #         torch.save((tgh.capture(gaussians, opt), iteration), scene.model_path + "/tgh_chkpnt_best.pth")
-                        
+
                 if (iteration in saving_iterations):
                 #if iteration % 100 == 0:
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
-                    scene.tgh.clear_tgh()
-                    scene.tgh.create_from_gaussians(gaussians)
                     scene.save(iteration, opt, tgh, id)
+
+                if not opacity_zero_reset_done and opacity_zero_reset_iter >= 0 and iteration == opacity_zero_reset_iter:
+                    print(f"\n[ITER {iteration}] Resetting global Gaussian opacity to {opacity_zero_reset_value}")
+                    gaussians.reset_opacity_zero(opacity_zero_reset_value)
+                    opacity_zero_reset_done = True
+
+                if should_periodic_opacity_reset(iteration):
+                    print(f"\n[ITER {iteration}] Periodic global opacity reset to {opacity_periodic_reset_value}")
+                    gaussians.reset_opacity_zero(opacity_periodic_reset_value)
                 # if iteration <= 3000:
                 #     densification_interval = 100
                 # elif iteration < 6000:
@@ -947,12 +1066,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # Densification
                 # if iteration <= opt.densify_until_iter2 and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
                 add_specular_grads = False
-                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points):
+                global_densify_active = (
+                    iteration <= opt.densify_until_iter
+                    and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points)
+                )
+                global_temporal_split_active = (
+                    temporal_split_from_iter <= iteration <= temporal_split_until_iter
+                    and (opt.densify_until_num_points < 0 or gaussians.get_xyz.shape[0] < opt.densify_until_num_points)
+                )
+                if global_densify_active or global_temporal_split_active:
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                     if batch_size == 1:
                         # if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2) and not (iteration > opt.densify_until_iter and iteration < opt.densify_from_iter2):
-                        if iteration >= 25000 and (iteration % densification_interval) > (densification_interval // 2):
+                        if global_temporal_split_active and (iteration % (2*densification_interval)) > (3 * (densification_interval // 2)):
                             add_specular_grads = True
                         else:
                             add_specular_grads = False
@@ -963,10 +1090,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and (iteration < 3000 or iteration > 6000):
                     # if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2)) and (iteration % densification_interval == 0):
-                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval == 0):
+                    if (global_densify_active or global_temporal_split_active) and iteration > opt.densify_from_iter and (iteration % densification_interval == 0):
                     #if iteration > 100:
                         size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        if iteration >= 25000:
+                        if global_temporal_split_active:
                             densify_split_time = True
                         else:
                             densify_split_time = False
@@ -978,7 +1105,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         #         spec_time_thr = opt.densify_specular_time_threshold / 2
                         # else:
                         #     spec_time_thr = None
-                        gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr)
+                        split_time = False
+                        if iteration % (2 * densification_interval) == 0 and global_temporal_split_active:
+                            split_time = True
+                        if global_densify_active or spec_time_thr is not None:
+                            gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr, split_time=split_time)
                         # spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and add_specular_grads) else None
                         # gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)   
                     #if iteration > opt.densify_from_iter and iteration % (opt.densification_interval * 2) == 0:
@@ -989,7 +1120,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # print("reset opacity")
                         # if iteration == opt.opacity_reset_interval:
                         #gaussians.reset_opacity()
-                        if iteration < 20000:
+                        if iteration < 25000:
                             gaussians.reset_opacity_high()
                         #gaussians.reset_specular_high()
                         # gaussians.reset_feature()
@@ -1005,7 +1136,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     else:
                         local_gaussians.add_densification_stats_grad(batch_local_viewspace_point_grad, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None)
 
-                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % densification_interval // 2 == 0):
+                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % (densification_interval // 2) == 0):
                         local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         if iteration >= 20000000:
                             local_densify_split_time = True
@@ -1214,6 +1345,9 @@ if __name__ == "__main__":
             setattr(args, key, host[key])
     for k in cfg.keys():
         recursive_merge(k, cfg)
+
+    if args.start_checkpoint and not args.loaded_pth:
+        args.loaded_pth = args.start_checkpoint
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]

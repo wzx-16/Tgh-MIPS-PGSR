@@ -19,6 +19,12 @@ import torch
 
 WARNED = False
 
+def get_shared_camera_id(image_name, fallback):
+    prefix, separator, suffix = image_name.rpartition("_")
+    if separator and suffix.isdigit() and prefix:
+        return prefix
+    return fallback
+
 def loadCam(args, id, cam_info, resolution_scale):
     orig_w, orig_h = cam_info.width, cam_info.height# cam_info.image.size
 
@@ -99,7 +105,8 @@ def loadCam(args, id, cam_info, resolution_scale):
                   image_name=cam_info.image_name, uid=id, data_device=args.data_device, 
                   timestamp=cam_info.timestamp, W=resolution[0], H=resolution[1],
                   cx=cx, cy=cy, fl_x=fl_x, fl_y=fl_y, depth=depth, normal=normal, resolution=resolution, image_path=cam_info.image_path,
-                  meta_only=args.dataloader
+                  meta_only=args.dataloader,
+                  shared_camera_id=get_shared_camera_id(cam_info.image_name, cam_info.uid),
                   )
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):

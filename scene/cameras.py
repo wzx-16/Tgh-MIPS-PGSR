@@ -17,10 +17,13 @@ from kornia import create_meshgrid
 from copy import deepcopy
 
 class Camera:
+    pixel_camera_cache = {}
+
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, data_device = "cuda", timestamp = 0.0, W=0, H=0,
                  cx=-1, cy=-1, fl_x=-1, fl_y=-1, depth=None, normal=None, resolution=None, image_path=None, meta_only=False,
+                 shared_camera_id=None,
                  ):
 
         self.uid = uid
@@ -30,6 +33,7 @@ class Camera:
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
+        self.shared_camera_id = shared_camera_id if shared_camera_id is not None else colmap_id
         self.W = W
         self.H = H
         self.cx = cx
@@ -83,20 +87,40 @@ class Camera:
         self.camera_center = self.world_view_transform.inverse()[3, :3]
         
         self.timestamp = timestamp
-        K = np.zeros((3,3))
+        self.pixel_camera = None
+        self.pixel_camera_key = self.build_pixel_camera_key()
+        self.get_pixel_camera()
+
+    def build_pixel_camera_key(self):
+        return (
+            str(self.shared_camera_id),
+            int(self.W),
+            int(self.H),
+            round(float(self.fl_x), 6),
+            round(float(self.fl_y), 6),
+            round(float(self.cx), 6),
+            round(float(self.cy), 6),
+        )
+
+    def build_pixel_camera(self):
+        K = np.zeros((3, 3), dtype=np.float32)
         K[0][0] = self.fl_x
         K[0][2] = self.cx
         K[1][1] = self.fl_y
         K[1][2] = self.cy
         K[2][2] = 1
-        K = K.astype(np.float32)
-        i, j = np.meshgrid(np.arange(W, dtype=np.float32),
-                        np.arange(H, dtype=np.float32),
-                        indexing='xy')
+        i, j = np.meshgrid(np.arange(self.W, dtype=np.float32),
+                           np.arange(self.H, dtype=np.float32),
+                           indexing='xy')
         xy1 = np.stack([i, j, np.ones_like(i)], axis=2)
-        pixel_camera = np.dot(xy1, np.linalg.inv(K).T)
-        #pixel_camera = torch.tensor(pixel_camera).cuda()
-        self.pixel_camera = pixel_camera
+        return np.dot(xy1, np.linalg.inv(K).T)
+
+    def get_pixel_camera(self):
+        pixel_camera = Camera.pixel_camera_cache.get(self.pixel_camera_key)
+        if pixel_camera is None:
+            pixel_camera = self.build_pixel_camera()
+            Camera.pixel_camera_cache[self.pixel_camera_key] = pixel_camera
+        return pixel_camera
         
     def get_rays(self):
         grid = create_meshgrid(self.image_height, self.image_width, normalized_coordinates=False)[0] + 0.5
@@ -126,4 +150,3 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-
