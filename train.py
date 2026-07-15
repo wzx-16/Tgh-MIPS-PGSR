@@ -12,6 +12,7 @@
 import math
 import os
 import random
+from contextlib import contextmanager
 import torch
 from torch import nn
 from utils.loss_utils import get_img_grad_weight, get_img_grad_weight_grey, get_img_grad_weight_avg, l1_loss, ssim, msssim
@@ -58,6 +59,82 @@ def get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS):
     #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
     return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
 
+
+class IterationProfiler:
+    """Lightweight per-section wall-clock profiler, enabled with PROFILE_ITERS=<n>."""
+
+    def __init__(self):
+        self.max_iters = int(os.environ.get("PROFILE_ITERS", "0"))
+        self.enabled = self.max_iters > 0
+        self.times = {}
+        self.iters_done = 0
+        self._last_body_end = None
+        self._warmup = 10
+
+    def _sync(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _add(self, name, dt):
+        if self.iters_done < self._warmup:
+            return
+        acc = self.times.setdefault(name, [0.0, 0])
+        acc[0] += dt
+        acc[1] += 1
+
+    @contextmanager
+    def section(self, name):
+        if not self.enabled:
+            yield
+            return
+        self._sync()
+        t0 = time.perf_counter()
+        yield
+        self._sync()
+        self._add(name, time.perf_counter() - t0)
+
+    def begin(self, name):
+        if not self.enabled:
+            return
+        self._sync()
+        self._marks = getattr(self, "_marks", {})
+        self._marks[name] = time.perf_counter()
+
+    def end(self, name):
+        if not self.enabled:
+            return
+        self._sync()
+        marks = getattr(self, "_marks", {})
+        if name in marks:
+            self._add(name, time.perf_counter() - marks.pop(name))
+
+    def mark_body_start(self):
+        if not self.enabled:
+            return
+        self._sync()
+        now = time.perf_counter()
+        if self._last_body_end is not None:
+            self._add("data_wait", now - self._last_body_end)
+
+    def end_iter(self):
+        if not self.enabled:
+            return
+        self._sync()
+        self._last_body_end = time.perf_counter()
+        self.iters_done += 1
+        if self.iters_done >= self.max_iters + self._warmup:
+            self.report()
+            sys.exit(0)
+
+    def report(self):
+        print("\n===== Iteration profile (mean ms over %d iters) =====" % max(1, self.iters_done - self._warmup))
+        total = 0.0
+        for name, (t, n) in sorted(self.times.items(), key=lambda kv: -kv[1][0]):
+            mean_ms = t / max(n, 1) * 1000.0
+            total += t / max(n, 1) * 1000.0
+            print(f"{name:>16}: {mean_ms:9.2f} ms  (n={n})")
+        print(f"{'sum':>16}: {total:9.2f} ms")
+
 def entropy_loss(alpha):
     loss = -alpha * torch.log(alpha + 1e-10) - (1 - alpha) * torch.log(1 - alpha + 1e-10)
     loss = torch.mean(loss)
@@ -80,7 +157,7 @@ def _split_gaussian_checkpoint_payload(payload):
         return payload["gaussians"], payload.get("local_gaussians")
     return payload, None
 
-def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel, training_args=None):
+def initialize_local_gaussian_model(global_model: GaussianModel, local_model: GaussianModel, training_args=None, empty=False):
     local_model.gsdim = global_model.gsdim
     local_model.active_sh_degree = global_model.active_sh_degree
     local_model.active_sh_degree_t = global_model.active_sh_degree_t
@@ -104,10 +181,12 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
     for attr in tensor_attrs:
         src_val = getattr(global_model, attr, None)
         if isinstance(src_val, torch.Tensor):
-            setattr(local_model, attr, _clone_tensor_attr(src_val))
+            src_tensor = src_val[:0] if empty else src_val
+            setattr(local_model, attr, _clone_tensor_attr(src_tensor))
 
     if isinstance(global_model.max_radii2D, torch.Tensor):
-        local_model.max_radii2D = global_model.max_radii2D.detach().clone()
+        max_radii_src = global_model.max_radii2D[:0] if empty else global_model.max_radii2D
+        local_model.max_radii2D = max_radii_src.detach().clone()
 
     if isinstance(global_model.env_map, torch.Tensor):
         local_model.env_map = global_model.env_map.detach().clone()
@@ -168,6 +247,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     opacity_periodic_reset_until_iter = getattr(opt, "opacity_periodic_reset_until_iter", -1)
     lighting_start_iter = 9000
     albedo_sh_reset_done = False
+    local_feature_start_iter = 12000
+    local_branch_lazy_init = bool(getattr(opt, "local_branch_lazy_init", False))
+    if local_branch_lazy_init:
+        print(f"Lazy local branch: empty until iteration {local_feature_start_iter}, then cloned from global model")
 
     def should_periodic_opacity_reset(current_iter):
         return (
@@ -184,7 +267,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint, weights_only=False)
         model_params, local_model_params = _split_gaussian_checkpoint_payload(model_params)
         gaussians.restore(model_params, opt)
-        gaussian_init_flag = False
+        # Checkpoints already contain the fully-initialized point set; skip the
+        # first-iteration TGH append + local re-clone that fresh runs perform.
+        gaussian_init_flag = True
         if opacity_zero_reset_iter >= 0 and first_iter == opacity_zero_reset_iter:
             print(f"[ITER {first_iter}] Resetting global Gaussian opacity to {opacity_zero_reset_value}")
             gaussians.reset_opacity_zero(opacity_zero_reset_value)
@@ -197,19 +282,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print(f"[ITER {first_iter}] Initializing albedo from SH on resume")
                 gaussians.reset_albedo_from_sh()
             albedo_sh_reset_done = True
-        if local_model_params is not None:
+        if local_branch_lazy_init and first_iter < local_feature_start_iter:
+            initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=True)
+            print("Lazy local branch: initialized empty on resume.")
+        elif local_model_params is not None:
             local_gaussians.restore(local_model_params, opt)
             scene.local_gaussians_loaded = True
             print("Using embedded local Gaussian checkpoint.")
         elif not getattr(scene, "local_gaussians_loaded", False):
-            initialize_local_gaussian_model(gaussians, local_gaussians, opt)
+            initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=local_branch_lazy_init)
         else:
             setup_restored_local_gaussian_model(local_gaussians, opt)
             print("Using restored local Gaussian checkpoint.")
     else:
         gaussian_init_flag = False
         gaussians.training_setup(opt)
-        if not getattr(scene, "local_gaussians_loaded", False):
+        if local_branch_lazy_init:
+            initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=True)
+        elif not getattr(scene, "local_gaussians_loaded", False):
             initialize_local_gaussian_model(gaussians, local_gaussians, opt)
         else:
             setup_restored_local_gaussian_model(local_gaussians, opt)
@@ -255,9 +345,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         collate_fn=lambda x: x,
         drop_last=True,
         pin_memory=True,
+        persistent_workers=train_num_workers > 0,
+        prefetch_factor=4 if train_num_workers > 0 else None,
     )
     #print("test6")
     iteration = first_iter
+    profiler = IterationProfiler()
     fn_lpips = lpips.LPIPS(net='alex').cuda().eval()
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     #depth_guidance_checkpoint = "LiheYoung/depth-anything-base-hf"
@@ -288,7 +381,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     densification_interval = opt.densification_interval
     temporal_split_from_iter = getattr(opt, "temporal_split_from_iter", 25000)
     temporal_split_until_iter = getattr(opt, "temporal_split_until_iter", opt.densify_until_iter)
-    local_feature_start_iter = 12000
+    debug_interval = max(1, int(getattr(opt, "debug_interval", 50)))
     temporal_opacity_k_start = getattr(opt, "temporal_opacity_k_start", 2.0)
     temporal_opacity_k_final = getattr(opt, "temporal_opacity_k_final", 12.0)
     temporal_opacity_k_ramp_start = getattr(opt, "temporal_opacity_k_ramp_start", temporal_split_from_iter)
@@ -331,8 +424,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             densification_interval = 2000
         for batch_data in training_dataloader:
             #train_start = time.time()
+            profiler.mark_body_start()
             iteration += 1
             gaussians.temporal_schedule_iteration = iteration
+            if local_branch_lazy_init and iteration == local_feature_start_iter:
+                print(f"\n[ITER {iteration}] Spawning local Gaussian branch from current global model")
+                initialize_local_gaussian_model(gaussians, local_gaussians, opt)
             # if iteration > 20:
             #     exit()
 
@@ -415,25 +512,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gt_image = gt_image.cuda()
                 viewpoint_cam = viewpoint_cam.cuda()
                 #loaded_mask = loaded_mask.cuda()
-                # sky = (1 - loaded_mask) > 1 - 1e-6
-                # origin_gt = gt_image
-                #random_color = torch.zeros_like(gt_image, device = "cuda")
-        
-                #channel_idx = np.random.randint(0,3)
-                #print("random color", channel_idx)
-                #random_color[channel_idx, :, :] = 1.0
-                #gt_image[:, sky[0]] = random_color[:, sky[0]]
-                #render_start = time.time()
-                # copy_and_cat_engine.waitGroupCompletion(0, 0)
-                # render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-                # #torch.cuda.synchronize()
-                # #render_end = time.time()
-                # #print(f"render time: {render_end - render_start:.6f} seconds")
-                # image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
-                # depth = render_pkg["depth"]
-                # alpha = render_pkg["alpha"]
-                
-                viewpoint_cam = viewpoint_cam.cuda()
                 # _, gpu_mask = t_tree_model.find_t_batch([viewpoint_cam.timestamp])
                 
                 #xyz = gaussians.get_xyz + gaussians.get_velocity * (viewpoint_cam.timestamp - gaussians.get_t) / (gaussians.get_sigma_t + 1)
@@ -516,17 +594,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print("gaussiansize")
                 #print(xyz.size())
                 # print(opacity.size())
-                gaussians.brdf_mlp.build_mips()
-                #gaussians.brdf_mlp_2.build_mips()
-                view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
-                d_viewdir_normalized = safe_normalize(view_pos - xyz)
-                normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
-                normal = normal + gaussians.get_delta_normal
-                reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
-                dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
-                dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
-                render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
-                                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp, local_feature_start_iter=local_feature_start_iter)
+                with profiler.section("prep"):
+                    gaussians.brdf_mlp.build_mips()
+                    #gaussians.brdf_mlp_2.build_mips()
+                    view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1) 
+                    d_viewdir_normalized = safe_normalize(view_pos - xyz)
+                    normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
+                    normal = normal + gaussians.get_delta_normal
+                    reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
+                    dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
+                    dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
+                with profiler.section("render"):
+                    render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
+                                        gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp, local_feature_start_iter=local_feature_start_iter)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -549,25 +629,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 spec_coeff = render_pkg["spec_coeff"]
                 # if iteration > 3000:
                 #     loss += 0.5 * ((1 - spec_coeff).mean())
-                if iteration % 50 == 0:
+                profiler.begin("debug_io")
+                if iteration % debug_interval == 0:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     cv2.imwrite("./test{}/debug_render_{}.jpg".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
-                    if iteration % 100 == 0:
+                    if iteration % (2 * debug_interval) == 0:
                         print(xyz.size())
                     # if iteration > 3000:
                     #     torchvision.utils.save_image(spec_coeff, "spec_coeff.png")
                 feature_map = render_pkg["feature_map"]
                 rendered_delta_normal = render_pkg["rendered_delta_normal"]
                 rendered_local_feature_map = render_pkg["local_feature_map"]
-                if iteration % 100 == 0 and feature_map is not None:
+                if iteration % (2 * debug_interval) == 0 and feature_map is not None:
                     torchvision.utils.save_image(feature_map[:3], "./test_feature{}/feature_map_{}.png".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name))
-                if iteration % 100 == 0:
+                if iteration % (2 * debug_interval) == 0:
                     render_normal = render_pkg["rendered_normal"]
                     torchvision.utils.save_image((render_normal + 1) / 2, "render_normal.png")
-                if iteration % 100 == 0 and rendered_delta_normal is not None:
+                if iteration % (2 * debug_interval) == 0 and rendered_delta_normal is not None:
                     torchvision.utils.save_image((rendered_delta_normal + 1) / 2, "rendered_delta_normal.png")
-                if iteration % 100 == 0 and rendered_local_feature_map is not None:
+                if iteration % (2 * debug_interval) == 0 and rendered_local_feature_map is not None:
                     torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, "rendered_local_feature_map.png")
+                profiler.end("debug_io")
+                profiler.begin("loss_fwd")
                 #loss_start = time.time()
                 # Loss
                 Ll1 = l1_loss(image, gt_image)
@@ -592,8 +675,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #print("loss 1", loss)
                 # spec_coeff = render_pkg["spec_coeff"]
                 # loss += 0.1 * ((1 - spec_coeff).mean())
-                weight_conf = 1.0 - get_img_grad_weight(gt_image)
-                decay_weight = get_decay_weight(15000, 30000, iteration)
                 if iteration < 40000:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
@@ -608,7 +689,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #print("render depth", render_depth.shape)
                     avg_diff_render = torch.mean(torch.abs(render_depth - render_depth.median()))
                     render_depth_norm = (render_depth - render_depth.median()) / avg_diff_render
-                    depth_grad = (1 - get_img_grad_weight_grey(predicted_depth)).detach()
                     if iteration > 1500:
                     # elif iteration < 6000:
                     #     loss += 0.01 * torch.abs(depth_norm + render_depth_norm).mean()
@@ -618,13 +698,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #     loss += 0.3 * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
                     # elif iteration < 30000:
                     #     loss += 0.3 * decay_weight * (depth_grad * torch.abs((depth_norm + render_depth_norm))).mean()
-                    if iteration % 100 == 1:
+                    if iteration % (2 * debug_interval) == 1:
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
                         #torchvision.utils.save_image(render_depth_image, "render_depth.png")
                         torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
 
-                if iteration % 100 == 0:
+                if iteration % (2 * debug_interval) == 0:
                     render_depth = render_pkg["depth"]
                     render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
                     torchvision.utils.save_image(render_depth_image, "render_depth.png")
@@ -653,8 +733,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     render_normal_norm = torch.nn.functional.normalize(render_normal, dim=0, eps=1e-6)
                     # print("render normal", render_normal_norm.shape)
                     # print("predict normal", normal_norm.shape)
-                    normal_grad = get_img_grad_weight_avg(normal_norm)
-                    render_normal_grad = get_img_grad_weight_avg(render_normal_norm)
+                    #normal_grad = get_img_grad_weight_avg(normal_norm)
+                    #render_normal_grad = get_img_grad_weight_avg(render_normal_norm)
                     #print("normal grad", normal_grad.shape)
                     #print("render normal grad", render_normal_grad.shape)
                     # with torch.no_grad():
@@ -684,7 +764,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #     loss += 0.02 * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
                     # elif iteration >= 20000:
                     #     loss += 0.02 * decay_weight * (depth_grad * ((normal_grad - render_normal_grad).abs().sum(dim=0))).mean()
-                    if iteration % 100 == 1:
+                    if iteration % (2 * debug_interval) == 1:
                     #predicted_normal_image = (predicted_normal - predicted_normal.min()) / (predicted_normal.max() - predicted_normal.min())
                     #render_normal_image = (render_normal - render_normal.min()) / (render_normal.max() - render_normal.min())
                         # render_normal_norm[0, 0:30, 0:30] = 0
@@ -866,7 +946,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #     # cv2.imwrite("./test/debug_render1.png", (((de0-de0.min())/(de0.max()-de0.min())).clip(min=0, max=1).squeeze()[..., None][..., [0]*3].detach().cpu().numpy() * 255).astype(np.uint8))
 
-                    image_weight = (1.0 - get_img_grad_weight(gt_image))
+                    image_weight = None
+                    # image_weight = (1.0 - get_img_grad_weight(gt_image))
                     # image_weight = (image_weight).clamp(0,1).detach() ** 2
                     if True:
                         # image_weight = erode(image_weight[None,None]).squeeze()
@@ -924,7 +1005,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if iteration >= 3000:
                     #     loss += 0.1 * (gaussians.get_specular).mean()
                 loss = loss / batch_size
-                loss.backward()
+                profiler.end("loss_fwd")
+                with profiler.section("backward"):
+                    loss.backward()
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
@@ -993,9 +1076,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     local_batch_t_grad = None
             
             iter_end.record()
+            profiler.begin("log_misc")
             loss_dict = {"Ll1": Ll1,
                         "Lssim": Lssim}
-            if iteration % 100 == 0:
+            if iteration % (2 * debug_interval) == 0:
                 velocity2 = gaussians.get_velocity2
                 if pipe.temporal_opacity_mode == "flat_window":
                     print_tensor_distribution("edge_sigma", gaussians.get_temporal_edge_sigma())
@@ -1006,7 +1090,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     print("temporal targets:", get_temporal_opacity_target_k(iteration))
             with torch.no_grad():
                 #optimizer_start = time.time()
-                psnr_for_log = psnr(image, gt_image).mean()
                 # Progress bar
                 ema_loss_for_log = 0.4 * loss.item()# + 0.6 * ema_loss_for_log
                 ema_l1loss_for_log = 0.4 * Ll1.item() + 0.6 * ema_l1loss_for_log
@@ -1019,6 +1102,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         loss_dict[lambda_name.replace("lambda_", "L")] = vars()[lambda_name.replace("lambda_", "L")]
                         
                 if iteration % 10 == 0:
+                    psnr_for_log = psnr(image, gt_image).mean()
                     postfix = {"Loss": f"{ema_loss_for_log:.{7}f}",
                                             "PSNR": f"{psnr_for_log:.{2}f}",
                                             "Ll1": f"{ema_l1loss_for_log:.{4}f}",
@@ -1056,6 +1140,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if should_periodic_opacity_reset(iteration):
                     print(f"\n[ITER {iteration}] Periodic global opacity reset to {opacity_periodic_reset_value}")
                     gaussians.reset_opacity_zero(opacity_periodic_reset_value)
+                profiler.end("log_misc")
+                profiler.begin("densify")
                 # if iteration <= 3000:
                 #     densification_interval = 100
                 # elif iteration < 6000:
@@ -1156,12 +1242,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #     spec_time_thr = opt.densify_specular_time_threshold if opt.densify_specular_time_threshold > 0 and add_specular_grads else None
                 #     gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)
                 # Optimizer step
+                profiler.end("densify")
                 if iteration < opt.iterations:
                     # copy_and_cat_engine.waitGroupCompletion(0, 0)
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                    local_gaussians.optimizer.step()
-                    local_gaussians.optimizer.zero_grad(set_to_none = True)
+                    with profiler.section("opt_step"):
+                        gaussians.optimizer.step()
+                        gaussians.optimizer.zero_grad(set_to_none = True)
+                        local_gaussians.optimizer.step()
+                        local_gaussians.optimizer.zero_grad(set_to_none = True)
                     # if pipe.env_map_res and iteration < pipe.env_optimize_until:
                     #     env_map_optimizer.step()
                     #     env_map_optimizer.zero_grad(set_to_none = True)
@@ -1185,7 +1273,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #gaussians.clone_from_cpu(gaussians_segments)
                     gaussians.reset_param_groups()
                     gaussians.append_state_from_gaussians_cpu(gaussians_segments, state_dict)
-                    initialize_local_gaussian_model(gaussians, local_gaussians, opt)
+                    initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=local_branch_lazy_init)
                 # if save_flag:
                     #torch.save((tgh.capture(gaussians), iteration), scene.model_path + "/tgh_chkpnt_best_after_prune.pth")
                 #cuda_to_cpu_end = time.time()
@@ -1198,6 +1286,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # torch.cuda.synchronize()
             # train_end = time.time()
             # print(f"train time:{train_end - train_start:.6f} seconds")
+            profiler.end_iter()
 
 
 def prepare_output_and_logger(args):    

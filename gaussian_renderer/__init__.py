@@ -377,7 +377,7 @@ def render_3d_pgsr(
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
     local_distance = -(local_normal * pts_in_cam).sum(-1)
-    input_all_map = torch.zeros((means3D.shape[0], 5)).cuda().float()
+    input_all_map = torch.zeros((means3D.shape[0], 5), device="cuda", dtype=torch.float32)
     input_all_map[:, :3] = local_normal
     input_all_map[:, 3] = 1.0
     input_all_map[:, 4] = local_distance
@@ -555,8 +555,6 @@ def render_3d_pgsr_anti(
     xyz = pc.get_xyz + pc.get_velocity * (viewpoint_camera.timestamp - pc.get_t) / pc.get_sigma_t_fixed
     view_pos = viewpoint_camera.camera_center
     diffuse = pc.get_diffuse(dir_pp)
-    rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
-    rgb = torch.clamp_min(rgb + 0.5, 0.0)
     #rgb = torch.clamp_min(rgb + 0.5, -torch.log(torch.tensor(5.0, device=rgb.device)))
     #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
     ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
@@ -583,43 +581,38 @@ def render_3d_pgsr_anti(
         local_xyz = local_pc.get_xyz
         local_opacity = local_pc.get_opacity
 
-    local_scaling = local_pc.get_scaling
-    local_rotation = local_pc.get_rotation
-    local_feature = local_pc.get_specular
-    #local_feature = local_pc.get_specular2
-    if local_feature.shape[1] < pc.gsdim:
-        pad = torch.zeros(
-            (local_feature.shape[0], pc.gsdim - local_feature.shape[1]),
-            device=local_feature.device,
-            dtype=local_feature.dtype,
-        )
-        local_feature = torch.cat([local_feature, pad], dim=1)
-    else:
-        local_feature = local_feature[:, :pc.gsdim]
+    run_local_pass = (iteration >= local_feature_start_iter) and local_xyz.shape[0] > 0
+    if run_local_pass:
+        local_scaling = local_pc.get_scaling
+        local_rotation = local_pc.get_rotation
+        local_feature = local_pc.get_specular
+        #local_feature = local_pc.get_specular2
+        if local_feature.shape[1] < pc.gsdim:
+            pad = torch.zeros(
+                (local_feature.shape[0], pc.gsdim - local_feature.shape[1]),
+                device=local_feature.device,
+                dtype=local_feature.dtype,
+            )
+            local_feature = torch.cat([local_feature, pad], dim=1)
+        else:
+            local_feature = local_feature[:, :pc.gsdim]
     #specular2 = pc._specular2
     roughness = pc.get_roughness
     delta_normal = pc.get_delta_normal
     color = torch.zeros_like(diffuse)
-    # if iteration > 1000000:
-    #     color = pc.brdf_mlp.shade(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
-    #     #color2 = pc.brdf_mlp_2.shade_without_diffuse(xyz[None, None, ...].detach(), normal[None, None, ...], reflect[None, None, ...], diffuse[None, None, ...], specular2[None, None, ...], roughness[None, None, ...], view_pos[None, None, ...], iteration)
-    #     #color = color + color2
-    #     #color = diffuse
-    #     #color = linear2srgb(color)
-    #     shs = None
-    #     colors_precomp = color.squeeze() 
-    # elif iteration < 0:
-    #     #color = torch.sigmoid(diffuse - np.log(3.0))
-    #     color = diffuse
-    #     colors_precomp = color.squeeze() 
-    #     shs = None
     if iteration < 9000:
+        rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
+        rgb = torch.clamp_min(rgb + 0.5, 0.0)
         color = rgb
         colors_precomp = color.squeeze() 
         shs = None
     else:
+        # Only points outside the environment sphere use SH colors; evaluate SH just for them.
+        outside_idx = outside_mask.nonzero(as_tuple=True)[0]
         color[~outside_mask] = albedo[~outside_mask]
-        color[outside_mask] = rgb[outside_mask]
+        if outside_idx.numel() > 0:
+            rgb_out = eval_sh(pc.active_sh_degree, pc.get_features[outside_idx].transpose(1, 2), dir_pp[outside_idx])
+            color[outside_idx] = torch.clamp_min(rgb_out + 0.5, 0.0)
         colors_precomp = color.squeeze() 
         shs = None
 
@@ -673,7 +666,7 @@ def render_3d_pgsr_anti(
     pts_in_cam = means3D @ viewpoint_camera.world_view_transform[:3,:3] + viewpoint_camera.world_view_transform[3,:3]
     depth_z = pts_in_cam[:, 2]
     local_distance = -(local_normal * pts_in_cam).sum(-1)
-    input_all_map = torch.zeros((means3D.shape[0], 32)).cuda().float()
+    input_all_map = torch.zeros((means3D.shape[0], 32), device="cuda", dtype=torch.float32)
     input_all_map[:, :3] = local_normal
     input_all_map[:, 3] = 1.0
     input_all_map[:, 4] = local_distance
@@ -693,14 +686,11 @@ def render_3d_pgsr_anti(
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
-    local_feature_coeff = local_pc.get_specular2[:, pc.gsdim:] * 2
     if iteration >= 30000:
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     if iteration >= 20000:
         pass
         #local_feature = local_feature + (local_feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
-    if iteration < local_feature_start_iter:
-        local_feature = torch.zeros_like(local_feature)
     #feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 4) @ cos_feature).squeeze()
     input_all_map[:, 12:16] = feature
     input_all_map[:, 16:19] = albedo
@@ -730,27 +720,8 @@ def render_3d_pgsr_anti(
         )
 
     # Render local Gaussians in an isolated pass so local lighting stays decoupled
-    # from the normal/global Gaussian accumulation.
-    local_raster_settings = PlaneGaussianRasterizationSettings(
-            image_height=int(viewpoint_camera.image_height),
-            image_width=int(viewpoint_camera.image_width),
-            tanfovx=tanfovx,
-            tanfovy=tanfovy,
-            kernel_size=0.3,
-            bg=torch.zeros_like(bg_color),
-            cx=principal_x,
-            cy=principal_y,
-            scale_modifier=scaling_modifier,
-            viewmatrix=viewpoint_camera.world_view_transform,
-            projmatrix=viewpoint_camera.full_proj_transform,
-            sh_degree=active_sh_degree,
-            campos=viewpoint_camera.camera_center,
-            prefiltered=False,
-            render_geo=True,
-            debug=False,
-        )
-    local_rasterizer = PlaneGaussianRasterizer(raster_settings=local_raster_settings)
-
+    # from the normal/global Gaussian accumulation. Skipped entirely while the local
+    # feature branch is inactive (features would be zeroed anyway) or has no points.
     local_means3D = local_xyz
     local_screenspace_points = torch.zeros_like(local_means3D, dtype=local_means3D.dtype, requires_grad=True, device=local_means3D.device) + 0
     local_screenspace_points_abs = torch.zeros_like(local_means3D, dtype=local_means3D.dtype, requires_grad=True, device=local_means3D.device) + 0
@@ -762,53 +733,77 @@ def render_3d_pgsr_anti(
     except:
         pass
 
-    # Ensure local pass tensors share the same device as the rasterization config.
-    raster_device = bg_color.device
-    if local_means3D.device != raster_device:
-        local_means3D = local_means3D.to(raster_device)
-        local_means2D = local_means2D.to(raster_device)
-        local_means2D_abs = local_means2D_abs.to(raster_device)
-        local_scaling = local_scaling.to(raster_device)
-        local_rotation = local_rotation.to(raster_device)
-        local_feature = local_feature.to(raster_device)
-        local_opacity = local_opacity.to(raster_device)
-    if local_mask is not None:
-        local_mask = local_mask.reshape(-1).to(device=local_means3D.device, dtype=torch.bool)
-        if local_mask.numel() == 1 and local_means3D.shape[0] > 1:
-            local_mask = local_mask.expand(local_means3D.shape[0])
-        elif local_mask.shape[0] != local_means3D.shape[0]:
-            local_mask = torch.ones(local_means3D.shape[0], device=local_means3D.device, dtype=torch.bool)
+    out_all_map_local = None
+    if run_local_pass:
+        local_raster_settings = PlaneGaussianRasterizationSettings(
+                image_height=int(viewpoint_camera.image_height),
+                image_width=int(viewpoint_camera.image_width),
+                tanfovx=tanfovx,
+                tanfovy=tanfovy,
+                kernel_size=0.3,
+                bg=torch.zeros_like(bg_color),
+                cx=principal_x,
+                cy=principal_y,
+                scale_modifier=scaling_modifier,
+                viewmatrix=viewpoint_camera.world_view_transform,
+                projmatrix=viewpoint_camera.full_proj_transform,
+                sh_degree=active_sh_degree,
+                campos=viewpoint_camera.camera_center,
+                prefiltered=False,
+                render_geo=True,
+                debug=False,
+            )
+        local_rasterizer = PlaneGaussianRasterizer(raster_settings=local_raster_settings)
 
-    if local_mask is not None:
-        local_means3D = local_means3D[local_mask]
-        local_means2D = local_means2D[local_mask]
-        local_means2D_abs = local_means2D_abs[local_mask]
-        local_scaling = local_scaling[local_mask]
-        local_rotation = local_rotation[local_mask]
-        local_feature = local_feature[local_mask]
-        local_opacity = local_opacity[local_mask]
+        # Ensure local pass tensors share the same device as the rasterization config.
+        raster_device = bg_color.device
+        if local_means3D.device != raster_device:
+            local_means3D = local_means3D.to(raster_device)
+            local_means2D = local_means2D.to(raster_device)
+            local_means2D_abs = local_means2D_abs.to(raster_device)
+            local_scaling = local_scaling.to(raster_device)
+            local_rotation = local_rotation.to(raster_device)
+            local_feature = local_feature.to(raster_device)
+            local_opacity = local_opacity.to(raster_device)
+        if local_mask is not None:
+            local_mask = local_mask.reshape(-1).to(device=local_means3D.device, dtype=torch.bool)
+            if local_mask.numel() == 1 and local_means3D.shape[0] > 1:
+                local_mask = local_mask.expand(local_means3D.shape[0])
+            elif local_mask.shape[0] != local_means3D.shape[0]:
+                local_mask = torch.ones(local_means3D.shape[0], device=local_means3D.device, dtype=torch.bool)
 
-    local_input_all_map = torch.zeros((local_means3D.shape[0], 32), device=local_means3D.device, dtype=local_means3D.dtype)
-    local_input_all_map[:, 3] = 1.0
-    local_input_all_map[:, 12:16] = local_feature
-    local_colors_precomp = torch.zeros((local_means3D.shape[0], 3), device=local_means3D.device, dtype=local_means3D.dtype)
-    local_opacity_render = local_opacity
-    _, local_radii, _, out_all_map_local, _ = local_rasterizer(
-        means3D = local_means3D,
-        means2D = local_means2D,
-        means2D_abs = local_means2D_abs,
-        shs = None,
-        colors_precomp = local_colors_precomp,
-        opacities = local_opacity_render,
-        scales = local_scaling,
-        rotations = local_rotation,
-        all_map = local_input_all_map,
-    )
+        if local_mask is not None:
+            local_means3D = local_means3D[local_mask]
+            local_means2D = local_means2D[local_mask]
+            local_means2D_abs = local_means2D_abs[local_mask]
+            local_scaling = local_scaling[local_mask]
+            local_rotation = local_rotation[local_mask]
+            local_feature = local_feature[local_mask]
+            local_opacity = local_opacity[local_mask]
 
-    if local_mask is not None:
-        local_radii_all = local_radii.new_zeros(local_mask.shape)
-        local_radii_all[local_mask] = local_radii
-        local_radii = local_radii_all
+        local_input_all_map = torch.zeros((local_means3D.shape[0], 32), device=local_means3D.device, dtype=local_means3D.dtype)
+        local_input_all_map[:, 3] = 1.0
+        local_input_all_map[:, 12:16] = local_feature
+        local_colors_precomp = torch.zeros((local_means3D.shape[0], 3), device=local_means3D.device, dtype=local_means3D.dtype)
+        local_opacity_render = local_opacity
+        _, local_radii, _, out_all_map_local, _ = local_rasterizer(
+            means3D = local_means3D,
+            means2D = local_means2D,
+            means2D_abs = local_means2D_abs,
+            shs = None,
+            colors_precomp = local_colors_precomp,
+            opacities = local_opacity_render,
+            scales = local_scaling,
+            rotations = local_rotation,
+            all_map = local_input_all_map,
+        )
+
+        if local_mask is not None:
+            local_radii_all = local_radii.new_zeros(local_mask.shape)
+            local_radii_all[local_mask] = local_radii
+            local_radii = local_radii_all
+    else:
+        local_radii = torch.zeros(local_means3D.shape[0], dtype=torch.int32, device=local_means3D.device)
     # torch.cuda.synchronize()
     # print(viewpoint_camera.extr, "3")
     # print("extr id:", id(viewpoint_camera.extr))
@@ -841,8 +836,12 @@ def render_3d_pgsr_anti(
     rendered_specular2 = out_all_map[12:16]
     rendered_albedo = out_all_map[16:19]
     rendered_diffuse = out_all_map[29:32]
-    rendered_local_alpha = out_all_map_local[3:4]
-    rendered_local_specular2 = out_all_map_local[12:16]
+    if out_all_map_local is not None:
+        rendered_local_alpha = out_all_map_local[3:4]
+        rendered_local_specular2 = out_all_map_local[12:16]
+    else:
+        rendered_local_alpha = torch.zeros_like(out_all_map[3:4])
+        rendered_local_specular2 = torch.zeros_like(out_all_map[12:16])
     rendered_global_normal = torch.nn.functional.normalize(rendered_global_normal.permute(1, 2, 0), dim=2, eps=1e-6)
     rendered_global_normal_adjusted = torch.nn.functional.normalize(rendered_global_normal_adjusted.permute(1, 2, 0), dim=2, eps=1e-6)
     rendered_specular = rendered_specular.permute(1, 2, 0)

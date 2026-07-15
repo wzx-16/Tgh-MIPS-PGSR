@@ -18,13 +18,15 @@ class CameraDataset(Dataset):
         viewpoint_cam = self.viewpoint_stack[index]
         if viewpoint_cam.meta_only:
             with Image.open(viewpoint_cam.image_path) as image_load:
-                im_data = np.array(image_load.convert("RGBA"))#[100:-100, 100:-100]
-            norm_data = im_data / 255.0
-            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + self.bg * (1 - norm_data[:, :, 3:4])
-            image_load = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
-            image_load = np.array(image_load)
-            #image_load = cv2.resize(image_load, (image_load.shape[1]//2, image_load.shape[0]//2), interpolation=cv2.INTER_LINEAR)
-            image_load = torch.from_numpy(image_load) / 255.0
+                if image_load.mode == "RGB":
+                    # Fast path: no alpha channel, skip the float64 RGBA blend entirely.
+                    im_rgb = np.array(image_load, dtype=np.uint8)
+                else:
+                    im_data = np.array(image_load.convert("RGBA"), dtype=np.float32)#[100:-100, 100:-100]
+                    norm_data = im_data / 255.0
+                    arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + self.bg * (1 - norm_data[:, :, 3:4])
+                    im_rgb = np.clip(arr * 255.0, 0, 255).astype(np.uint8)
+            image_load = torch.from_numpy(im_rgb).float().div_(255.0)
             resized_image_rgb = image_load.permute(2, 0, 1)
             # resized_image_rgb = PILtoTorch(image_load, viewpoint_cam.resolution)
             viewpoint_image = resized_image_rgb[:3, ...].clamp(0.0, 1.0)

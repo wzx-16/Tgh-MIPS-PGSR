@@ -68,7 +68,8 @@ OptimizationParams:
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
   temporal_split_from_iter: 30_000
-  temporal_split_until_iter: 35_000
+  temporal_split_until_iter: 60_000
+  densify_specular_time_threshold: 0.000001
   opacity_zero_reset_iter: 20000
   opacity_zero_reset_value: 0.5
   opacity_periodic_reset_interval: -1
@@ -85,7 +86,9 @@ OptimizationParams:
   temporal_flat_radius_ramp_start: 25_000
   temporal_flat_radius_ramp_end: 40_000
   temporal_flat_radius_loss_weight: 0.05
-  train_num_workers: 0
+  train_num_workers: 8
+  debug_interval: 200
+  local_branch_lazy_init: True
   densify_until_num_points: -1
   final_prune_from_iter: -1
   sh_increase_interval: 15000

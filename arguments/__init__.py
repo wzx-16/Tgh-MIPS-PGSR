@@ -146,6 +146,8 @@ class OptimizationParams(ParamGroup):
         self.temporal_flat_radius_ramp_end = 35_000
         self.temporal_flat_radius_loss_weight = 0.0
         self.train_num_workers = -1
+        self.debug_interval = 50
+        self.local_branch_lazy_init = False
         self.densify_until_num_points = -1
         self.final_prune_from_iter = -1
         self.sh_increase_interval = 1000
