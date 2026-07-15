@@ -138,6 +138,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #     print("sanity conv OK:", y.shape)
     #torch.autograd.set_detect_anomaly(True)
     print("id ", id)
+    print("densify_specular_time_threshold:", opt.densify_specular_time_threshold)
     os.makedirs(f"./test{id}", exist_ok=True)
     os.makedirs(f"./test_feature{id}", exist_ok=True)
     if dataset.frame_ratio > 1:
@@ -324,10 +325,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             densification_interval = 300
         elif iteration < 30000:
             densification_interval = 500
-        elif iteration < 35000:
+        elif iteration < 40000:
             densification_interval = 1000
         else:
-            densification_interval = 1000
+            densification_interval = 2000
         for batch_data in training_dataloader:
             #train_start = time.time()
             iteration += 1

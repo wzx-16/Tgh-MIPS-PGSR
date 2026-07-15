@@ -68,7 +68,8 @@ OptimizationParams:
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
   temporal_split_from_iter: 30_000
-  temporal_split_until_iter: 35_000
+  temporal_split_until_iter: 60_000
+  densify_specular_time_threshold: 0.000001
   opacity_zero_reset_iter: 20000
   opacity_zero_reset_value: 0.5
   opacity_periodic_reset_interval: -1

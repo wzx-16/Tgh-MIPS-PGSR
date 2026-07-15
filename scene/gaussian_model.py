@@ -51,7 +51,7 @@ class SphMipEncoding(nn.Module):
         self,
         n_levels: int = 8,
         plane_size: int = 512,
-        feature_dim: int = 16,
+        feature_dim: int = 32,
         Sn: int = 1,
         dim: int = 1,
         rand_init: bool = False,
@@ -2345,6 +2345,27 @@ class GaussianModel:
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
+    def get_optimizer_states_by_mask(self, mask, repeat_n=1):
+        """Collect per-point Adam moments (exp_avg / exp_avg_sq) for the selected
+        points so children created from them can inherit the converged optimizer
+        state instead of starting from zeroed moments (which causes large
+        sign-normalized first steps and destabilizes freshly split Gaussians)."""
+        states = {}
+        for group in self.optimizer.param_groups:
+            if group["name"] in ("brdf_mlp", "light_mlp", "light_mlp2", "dir_encoding"):
+                continue
+            stored_state = self.optimizer.state.get(group['params'][0], None)
+            if stored_state is None or "exp_avg" not in stored_state:
+                continue
+            exp_avg = stored_state["exp_avg"][mask]
+            exp_avg_sq = stored_state["exp_avg_sq"][mask]
+            if repeat_n > 1:
+                repeat_dims = [repeat_n] + [1] * (exp_avg.dim() - 1)
+                exp_avg = exp_avg.repeat(*repeat_dims)
+                exp_avg_sq = exp_avg_sq.repeat(*repeat_dims)
+            states[group["name"]] = {"exp_avg": exp_avg, "exp_avg_sq": exp_avg_sq}
+        return states
+
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
@@ -2404,7 +2425,7 @@ class GaussianModel:
                 self._roughness = optimizable_tensors['roughness']
             self.t_gradient_accum = self.t_gradient_accum[valid_points_mask]
 
-    def cat_tensors_to_optimizer(self, tensors_dict):
+    def cat_tensors_to_optimizer(self, tensors_dict, states_dict=None):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
             if group["name"] == "brdf_mlp":
@@ -2419,9 +2440,16 @@ class GaussianModel:
             extension_tensor = tensors_dict[group["name"]]
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
+                extension_state = None if states_dict is None else states_dict.get(group["name"], None)
+                if extension_state is not None:
+                    exp_avg_ext = extension_state["exp_avg"].to(stored_state["exp_avg"].dtype).to(stored_state["exp_avg"].device)
+                    exp_avg_sq_ext = extension_state["exp_avg_sq"].to(stored_state["exp_avg_sq"].dtype).to(stored_state["exp_avg_sq"].device)
+                else:
+                    exp_avg_ext = torch.zeros_like(extension_tensor)
+                    exp_avg_sq_ext = torch.zeros_like(extension_tensor)
 
-                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], torch.zeros_like(extension_tensor)), dim=0)
-                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], torch.zeros_like(extension_tensor)), dim=0)
+                stored_state["exp_avg"] = torch.cat((stored_state["exp_avg"], exp_avg_ext), dim=0)
+                stored_state["exp_avg_sq"] = torch.cat((stored_state["exp_avg_sq"], exp_avg_sq_ext), dim=0)
 
                 del self.optimizer.state[group['params'][0]]
                 group["params"][0] = nn.Parameter(torch.cat((group["params"][0], extension_tensor), dim=0).requires_grad_(True))
@@ -2434,7 +2462,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness, new_opt_states=None):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
@@ -2456,7 +2484,7 @@ class GaussianModel:
                 d["delta_normal"] = new_delta_normal
                 d["roughness"] = new_roughness
 
-        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        optimizable_tensors = self.cat_tensors_to_optimizer(d, states_dict=new_opt_states)
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._features_rest = optimizable_tensors["f_rest"]
@@ -2619,7 +2647,13 @@ class GaussianModel:
         # new_velocity3 = self._velocity3[selected_pts_mask].repeat(N,1)
         #new_rot_velocity = self._rot_velocity[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
+        # Children inherit the parents' Adam moments: zeroed moments make Adam
+        # take ~lr-sized sign-normalized steps on a large, spatially concentrated
+        # set of dynamic Gaussians, which breaks the xyz/velocity/t cancellation
+        # the split relies on and causes ghosting right after each split round.
+        new_opt_states = self.get_optimizer_states_by_mask(selected_pts_mask, repeat_n=N)
+
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness, new_opt_states=new_opt_states)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         if defer_prune:
