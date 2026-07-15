@@ -32,6 +32,10 @@ PipelineParams:
   eval_shfs_4d: True
   temporal_opacity_mode: "flat_window"
   temporal_flat_radius_mult: 1.0
+  sph_residual_keyframes: 12
+  sph_residual_from_iter: 20_000
+  sph_time_min: 0.6666666666666666
+  sph_time_max: 2.6333333333333333
 
 OptimizationParams:
   iterations: 80_000

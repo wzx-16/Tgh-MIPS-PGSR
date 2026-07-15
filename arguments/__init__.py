@@ -79,6 +79,10 @@ class PipelineParams(ParamGroup):
         self.temporal_opacity_mode = "normalized_sigmoid"
         self.temporal_flat_radius_mult = 0.75
         self.temporal_flat_edge_sigma_mult = 2.0
+        self.sph_residual_keyframes = 0
+        self.sph_residual_from_iter = 20_000
+        self.sph_time_min = -1.0
+        self.sph_time_max = -1.0
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):

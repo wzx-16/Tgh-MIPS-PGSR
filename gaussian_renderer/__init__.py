@@ -934,7 +934,7 @@ def render_3d_pgsr_anti(
         wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
         spec_level = rendered_roughness.reshape(-1, 1)[select_index]
 
-        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp).reshape(-1, pc.sph_dim)
+        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp, iteration=iteration).reshape(-1, pc.sph_dim)
         #wo = -rays_d
         #wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
         spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)

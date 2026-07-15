@@ -57,17 +57,71 @@ class SphMipEncoding(nn.Module):
         rand_init: bool = False,
         time_min: float = 0.0,
         time_max: float = 1.0,
+        residual_keyframes: int = 0,
+        residual_start_iteration: int = 0,
     ):
         super(SphMipEncoding, self).__init__()
         self.n_levels = n_levels
         self.plane_size = plane_size
         self.time_min = float(time_min)
         self.time_max = float(time_max)
+        self.residual_start_iteration = int(residual_start_iteration)
         
         self.register_parameter("fm", nn.Parameter(torch.zeros(Sn, dim, plane_size, 2*plane_size, feature_dim)),)
+
+        self.fm_residual = None
+        if residual_keyframes > 0:
+            self._create_residual_keyframes(residual_keyframes)
         
         if rand_init:
             self.init_parameters()
+
+    def _create_residual_keyframes(self, residual_keyframes):
+        base = self.fm
+        self.fm_residual = nn.ParameterList([
+            nn.Parameter(torch.zeros(base.shape[1:], dtype=base.dtype, device=base.device))
+            for _ in range(int(residual_keyframes))
+        ])
+        per_map_mb = base.shape[1:].numel() * base.element_size() / (1024 ** 2)
+        print(f"[SphMipEncoding] Created {int(residual_keyframes)} time-switched residual keyframes "
+              f"({per_map_mb:.1f} MB each, zero-init).")
+
+    def ensure_residual_keyframes(self, residual_keyframes, time_min=None, time_max=None, start_iteration=None):
+        """Idempotent setup of time-switched residual keyframes.
+
+        Also upgrades dir_encoding modules unpickled from older checkpoints that
+        predate the residual feature, and refreshes the time range mapping."""
+        if time_min is not None:
+            self.time_min = float(time_min)
+        if time_max is not None:
+            self.time_max = float(time_max)
+        if start_iteration is not None:
+            self.residual_start_iteration = int(start_iteration)
+        elif not hasattr(self, "residual_start_iteration"):
+            self.residual_start_iteration = 0
+        if residual_keyframes is None or residual_keyframes <= 0:
+            return
+        existing = getattr(self, "fm_residual", None)
+        if existing is not None and len(existing) == int(residual_keyframes):
+            return
+        if existing is not None:
+            print(f"[SphMipEncoding] Residual keyframe count changed {len(existing)} -> {int(residual_keyframes)}; parameters reset.")
+        self._create_residual_keyframes(residual_keyframes)
+
+    def get_time_segment_index(self, timestamp):
+        fm_residual = getattr(self, "fm_residual", None)
+        key_count = 0 if fm_residual is None else len(fm_residual)
+        if key_count <= 1:
+            return 0
+        if torch.is_tensor(timestamp):
+            time_value = float(timestamp.detach().reshape(-1)[0].item())
+        else:
+            time_value = float(timestamp)
+        time_min = float(getattr(self, "time_min", 0.0))
+        time_max = float(getattr(self, "time_max", 1.0))
+        denom = max(time_max - time_min, 1.0e-6)
+        normalized_t = min(max((time_value - time_min) / denom, 0.0), 1.0)
+        return min(int(normalized_t * key_count), key_count - 1)
 
     def init_parameters(self) -> None:
         nn.init.uniform_(self.fm, -1e-2, 1e-2)
@@ -106,7 +160,7 @@ class SphMipEncoding(nn.Module):
 
         return torch.lerp(self.fm[key0], self.fm[key1], alpha)
         
-    def forward(self, x, level, index=0, weight=False, timestamp=None):
+    def forward(self, x, level, index=0, weight=False, timestamp=None, iteration=None):
         """
         x: [0,1], Nx3
         level: [0, max_level], Nx1
@@ -124,6 +178,18 @@ class SphMipEncoding(nn.Module):
                 index = int(index.reshape(-1)[0].item())
             key_idx = max(0, min(int(index), self.fm.shape[0] - 1))
             fm = self.fm[key_idx]
+
+        # Hard-switched (piecewise-constant in time) residual keyframes on top of the
+        # static base map: no cross-keyframe interpolation, so moving reflections are
+        # not blended between neighboring keyframes.
+        fm_residual = getattr(self, "fm_residual", None)
+        if (
+            fm_residual is not None
+            and len(fm_residual) > 0
+            and timestamp is not None
+            and (iteration is None or iteration >= getattr(self, "residual_start_iteration", 0))
+        ):
+            fm = fm + fm_residual[self.get_time_segment_index(timestamp)]
 
         return self._sample_feature_map(fm, decomposed_x, level)
 
@@ -266,6 +332,8 @@ class GaussianModel:
         # self.sph_time_max = 2.6333333333333333
         self.sph_time_min = 0.0
         self.sph_time_max = 1.9666666666666666
+        self.sph_residual_keyframes = 0
+        self.sph_residual_from_iter = 0
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -293,6 +361,8 @@ class GaussianModel:
             False,
             time_min=self.sph_time_min,
             time_max=self.sph_time_max,
+            residual_keyframes=getattr(self, "sph_residual_keyframes", 0),
+            residual_start_iteration=getattr(self, "sph_residual_from_iter", 0),
         ).cuda()
         self.light_mlp = nn.Sequential(
             nn.Linear(self.sph_dim * self.gsdim + self.sph_dim, run_dim),

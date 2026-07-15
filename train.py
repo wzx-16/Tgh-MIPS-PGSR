@@ -236,8 +236,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     local_gaussians.temporal_flat_edge_sigma_mult = pipe.temporal_flat_edge_sigma_mult
     print("Temporal opacity mode:", pipe.temporal_opacity_mode)
     print("Temporal flat legacy args:", pipe.temporal_flat_radius_mult, pipe.temporal_flat_edge_sigma_mult)
+    gaussians.sph_residual_keyframes = getattr(pipe, "sph_residual_keyframes", 0)
+    gaussians.sph_residual_from_iter = getattr(pipe, "sph_residual_from_iter", 0)
+    if getattr(pipe, "sph_time_min", -1.0) >= 0:
+        gaussians.sph_time_min = pipe.sph_time_min
+    if getattr(pipe, "sph_time_max", -1.0) >= 0:
+        gaussians.sph_time_max = pipe.sph_time_max
+    if gaussians.sph_residual_keyframes > 0:
+        print(f"Sph time-switched residual keyframes: {gaussians.sph_residual_keyframes} over "
+              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], active from iter {gaussians.sph_residual_from_iter}")
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
+    if gaussians.sph_residual_keyframes > 0 and gaussians.dir_encoding is not None:
+        # Scene() may have replaced dir_encoding with a module unpickled from an older
+        # checkpoint; upgrade it in place (idempotent for freshly created modules).
+        # Must run before training_setup so the residual params join the optimizer.
+        gaussians.dir_encoding.ensure_residual_keyframes(
+            gaussians.sph_residual_keyframes,
+            time_min=gaussians.sph_time_min,
+            time_max=gaussians.sph_time_max,
+            start_iteration=gaussians.sph_residual_from_iter,
+        )
     opacity_zero_reset_iter = getattr(opt, "opacity_zero_reset_iter", -1)
     opacity_zero_reset_value = getattr(opt, "opacity_zero_reset_value", 1.0e-6)
     opacity_zero_reset_done = False
