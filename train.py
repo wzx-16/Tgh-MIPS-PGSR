@@ -238,12 +238,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print("Temporal flat legacy args:", pipe.temporal_flat_radius_mult, pipe.temporal_flat_edge_sigma_mult)
     gaussians.sph_residual_keyframes = getattr(pipe, "sph_residual_keyframes", 0)
     gaussians.sph_residual_from_iter = getattr(pipe, "sph_residual_from_iter", 0)
+    gaussians.sph_hierarchy_bands = getattr(pipe, "sph_hierarchy_bands", "")
     if getattr(pipe, "sph_time_min", -1.0) >= 0:
         gaussians.sph_time_min = pipe.sph_time_min
     if getattr(pipe, "sph_time_max", -1.0) >= 0:
         gaussians.sph_time_max = pipe.sph_time_max
     if gaussians.sph_residual_keyframes > 0:
         print(f"Sph time-switched residual keyframes: {gaussians.sph_residual_keyframes} over "
+              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], active from iter {gaussians.sph_residual_from_iter}")
+    if gaussians.sph_hierarchy_bands:
+        print(f"Sph hierarchical time bands: {gaussians.sph_hierarchy_bands} over "
               f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], active from iter {gaussians.sph_residual_from_iter}")
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
@@ -253,6 +257,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Must run before training_setup so the residual params join the optimizer.
         gaussians.dir_encoding.ensure_residual_keyframes(
             gaussians.sph_residual_keyframes,
+            time_min=gaussians.sph_time_min,
+            time_max=gaussians.sph_time_max,
+            start_iteration=gaussians.sph_residual_from_iter,
+        )
+    if gaussians.sph_hierarchy_bands and gaussians.dir_encoding is not None:
+        # Same upgrade path for hierarchical time bands.
+        gaussians.dir_encoding.ensure_residual_hierarchy(
+            gaussians.sph_hierarchy_bands,
             time_min=gaussians.sph_time_min,
             time_max=gaussians.sph_time_max,
             start_iteration=gaussians.sph_residual_from_iter,

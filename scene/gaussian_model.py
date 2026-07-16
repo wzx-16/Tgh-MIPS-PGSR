@@ -46,11 +46,29 @@ def _parse_frame_filter(frame_filter):
             frames.add(int(part))
     return frames
 
+
+def _parse_sph_band_spec(spec):
+    """Parse a hierarchy band spec 'channels@keyframes[,channels@keyframes...]',
+    e.g. '4@5,3@15,1@30' -> [(4, 5), (3, 15), (1, 30)]."""
+    if spec is None:
+        return []
+    if isinstance(spec, (list, tuple)):
+        return [(int(ch), int(key)) for ch, key in spec]
+    bands = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        channels, keyframes = part.split("@", 1)
+        bands.append((int(channels), int(keyframes)))
+    return bands
+
 class SphMipEncoding(nn.Module):
     def __init__(
         self,
         n_levels: int = 8,
         plane_size: int = 512,
+        #feature_dim: int = 16,
         feature_dim: int = 32,
         Sn: int = 1,
         dim: int = 1,
@@ -59,6 +77,7 @@ class SphMipEncoding(nn.Module):
         time_max: float = 1.0,
         residual_keyframes: int = 0,
         residual_start_iteration: int = 0,
+        residual_bands=None,
     ):
         super(SphMipEncoding, self).__init__()
         self.n_levels = n_levels
@@ -72,6 +91,12 @@ class SphMipEncoding(nn.Module):
         self.fm_residual = None
         if residual_keyframes > 0:
             self._create_residual_keyframes(residual_keyframes)
+
+        self.fm_residual_bands = None
+        self.residual_band_spec = []
+        parsed_bands = _parse_sph_band_spec(residual_bands)
+        if parsed_bands:
+            self._create_residual_bands(parsed_bands)
         
         if rand_init:
             self.init_parameters()
@@ -85,6 +110,89 @@ class SphMipEncoding(nn.Module):
         per_map_mb = base.shape[1:].numel() * base.element_size() / (1024 ** 2)
         print(f"[SphMipEncoding] Created {int(residual_keyframes)} time-switched residual keyframes "
               f"({per_map_mb:.1f} MB each, zero-init).")
+
+    def _create_residual_bands(self, bands):
+        """Hierarchical time bands: trailing channel groups get zero-init residual
+        keyframe stacks at different temporal frequencies (lerped in time), while
+        the leading channels stay static (base map only)."""
+        base = self.fm
+        feature_dim = base.shape[-1]
+        bands = [(int(ch), max(1, int(key))) for ch, key in bands if int(ch) > 0]
+        total_band_ch = sum(ch for ch, _ in bands)
+        if total_band_ch > feature_dim:
+            raise ValueError(f"[SphMipEncoding] Hierarchy bands use {total_band_ch} channels "
+                             f"but feature_dim is only {feature_dim}.")
+        self.residual_band_spec = bands
+        self.fm_residual_bands = nn.ModuleList([
+            nn.ParameterList([
+                nn.Parameter(torch.zeros(*base.shape[1:-1], ch, dtype=base.dtype, device=base.device))
+                for _ in range(key_count)
+            ])
+            for ch, key_count in bands
+        ])
+        per_channel_map_mb = base.shape[1:-1].numel() * base.element_size() / (1024 ** 2)
+        total_mb = sum(ch * key for ch, key in bands) * per_channel_map_mb
+        layout = ", ".join(f"{ch}ch@{key}kf" for ch, key in bands)
+        print(f"[SphMipEncoding] Hierarchical time bands: {feature_dim - total_band_ch} static ch + "
+              f"{layout} (lerp, zero-init, {total_mb:.1f} MB total).")
+
+    def ensure_residual_hierarchy(self, residual_bands, time_min=None, time_max=None, start_iteration=None):
+        """Idempotent setup of hierarchical time-band residuals.
+
+        Also upgrades dir_encoding modules unpickled from older checkpoints that
+        predate the feature, and refreshes the time range mapping."""
+        if time_min is not None:
+            self.time_min = float(time_min)
+        if time_max is not None:
+            self.time_max = float(time_max)
+        if start_iteration is not None:
+            self.residual_start_iteration = int(start_iteration)
+        elif not hasattr(self, "residual_start_iteration"):
+            self.residual_start_iteration = 0
+        bands = [(int(ch), max(1, int(key))) for ch, key in _parse_sph_band_spec(residual_bands) if int(ch) > 0]
+        if not bands:
+            return
+        existing_spec = getattr(self, "residual_band_spec", None)
+        if existing_spec == bands and getattr(self, "fm_residual_bands", None) is not None:
+            return
+        if existing_spec:
+            print(f"[SphMipEncoding] Hierarchy band spec changed {existing_spec} -> {bands}; parameters reset.")
+        flat_residual = getattr(self, "fm_residual", None)
+        if flat_residual is not None and len(flat_residual) > 0:
+            print("[SphMipEncoding] Warning: flat residual keyframes present alongside hierarchical bands; both will be applied.")
+        self._create_residual_bands(bands)
+
+    def _get_band_keyframe_weights(self, timestamp, key_count):
+        if key_count <= 1:
+            return 0, 0, 0.0
+        if torch.is_tensor(timestamp):
+            time_value = float(timestamp.detach().reshape(-1)[0].item())
+        else:
+            time_value = float(timestamp)
+        time_min = float(getattr(self, "time_min", 0.0))
+        time_max = float(getattr(self, "time_max", 1.0))
+        denom = max(time_max - time_min, 1.0e-6)
+        normalized_t = min(max((time_value - time_min) / denom, 0.0), 1.0)
+        scaled_t = normalized_t * (key_count - 1)
+        key0 = min(int(math.floor(scaled_t)), key_count - 2)
+        return key0, key0 + 1, scaled_t - key0
+
+    def _compose_hierarchical_residual(self, fm, timestamp):
+        spec = self.residual_band_spec
+        total_band_ch = sum(ch for ch, _ in spec)
+        channel = fm.shape[-1] - total_band_ch
+        pieces = [fm[..., :channel]]
+        for band_params, (ch, key_count) in zip(self.fm_residual_bands, spec):
+            key0, key1, alpha = self._get_band_keyframe_weights(timestamp, key_count)
+            if key1 == key0 or alpha <= 0.0:
+                residual = band_params[key0]
+            elif alpha >= 1.0:
+                residual = band_params[key1]
+            else:
+                residual = band_params[key0] * (1.0 - alpha) + band_params[key1] * alpha
+            pieces.append(fm[..., channel:channel + ch] + residual)
+            channel += ch
+        return torch.cat(pieces, dim=-1)
 
     def ensure_residual_keyframes(self, residual_keyframes, time_min=None, time_max=None, start_iteration=None):
         """Idempotent setup of time-switched residual keyframes.
@@ -190,6 +298,18 @@ class SphMipEncoding(nn.Module):
             and (iteration is None or iteration >= getattr(self, "residual_start_iteration", 0))
         ):
             fm = fm + fm_residual[self.get_time_segment_index(timestamp)]
+
+        # Hierarchical time bands: trailing channel groups carry zero-init residual
+        # keyframe stacks at different temporal frequencies, linearly interpolated
+        # in time (piecewise-linear hat basis); leading channels stay static.
+        fm_bands = getattr(self, "fm_residual_bands", None)
+        if (
+            fm_bands is not None
+            and len(fm_bands) > 0
+            and timestamp is not None
+            and (iteration is None or iteration >= getattr(self, "residual_start_iteration", 0))
+        ):
+            fm = self._compose_hierarchical_residual(fm, timestamp)
 
         return self._sample_feature_map(fm, decomposed_x, level)
 
@@ -334,6 +454,7 @@ class GaussianModel:
         self.sph_time_max = 1.9666666666666666
         self.sph_residual_keyframes = 0
         self.sph_residual_from_iter = 0
+        self.sph_hierarchy_bands = ""
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -363,6 +484,7 @@ class GaussianModel:
             time_max=self.sph_time_max,
             residual_keyframes=getattr(self, "sph_residual_keyframes", 0),
             residual_start_iteration=getattr(self, "sph_residual_from_iter", 0),
+            residual_bands=getattr(self, "sph_hierarchy_bands", ""),
         ).cuda()
         self.light_mlp = nn.Sequential(
             nn.Linear(self.sph_dim * self.gsdim + self.sph_dim, run_dim),

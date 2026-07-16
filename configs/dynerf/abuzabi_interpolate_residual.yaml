@@ -35,7 +35,7 @@ PipelineParams:
   sph_residual_keyframes: 0
   sph_residual_from_iter: 20_000
   # 8 static ch + 4ch@5kf (~0.5s) + 3ch@15kf (~4 frames) + 1ch@30kf (~2 frames), lerped
-  sph_hierarchy_bands: "4@5,3@15,1@30"
+  sph_hierarchy_bands: "4@2,4@4,4@8,4@16,4@32"
   sph_time_min: 0.6666666666666666
   sph_time_max: 2.6333333333333333
 
