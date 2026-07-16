@@ -248,7 +248,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
               f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], active from iter {gaussians.sph_residual_from_iter}")
     if gaussians.sph_hierarchy_bands:
         print(f"Sph hierarchical time bands: {gaussians.sph_hierarchy_bands} over "
-              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], active from iter {gaussians.sph_residual_from_iter}")
+              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}], direct band keyframes (lerp), always active")
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     if gaussians.sph_residual_keyframes > 0 and gaussians.dir_encoding is not None:
