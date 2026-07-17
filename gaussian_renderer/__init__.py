@@ -934,7 +934,11 @@ def render_3d_pgsr_anti(
         wo_xyz = torch.stack([wo_xy[:, None, :]], dim=0,)
         spec_level = rendered_roughness.reshape(-1, 1)[select_index]
 
-        spec_feat = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp, iteration=iteration).reshape(-1, pc.sph_dim)
+        parity_channels = getattr(pc.dir_encoding, "parity_channels", 0)
+        sample_dim = pc.sph_dim + 2 * parity_channels
+        spec_feat_all = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp, iteration=iteration).reshape(-1, sample_dim)
+        spec_feat = spec_feat_all[:, :pc.sph_dim]
+        spec_feat_parity = spec_feat_all[:, pc.sph_dim:]
         #wo = -rays_d
         #wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
         spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)
@@ -984,7 +988,18 @@ def render_3d_pgsr_anti(
             #     [local_feature_selected, roughness_selected, cos_nr],
             #     dim=-1,
             # )
-            input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
+            if parity_channels > 0:
+                # Parity-slot dynamic keyframes: hat-weighted even/odd keyframe slot
+                # samples (already weighted inside dir_encoding) enter as their own
+                # outer products plus the two blend weights, so the MLP learns the
+                # temporal blend instead of consuming a pre-lerped map.  All inputs
+                # are continuous across keyframe crossings.
+                parity_outer = (spec_feat_parity.reshape(-1, 2 * parity_channels, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, 2 * parity_channels * pc.gsdim)
+                _, _, parity_w_a, parity_w_b = pc.dir_encoding.get_parity_slot_weights(timestamp)
+                parity_w = spec_feat.new_tensor([parity_w_a, parity_w_b]).expand(spec_feat.shape[0], 2)
+                input_mlp_base = torch.cat([spec_feat, sph_outer_feature, parity_outer, parity_w], dim=-1)
+            else:
+                input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
             #     dim=-1,

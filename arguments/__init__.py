@@ -82,6 +82,7 @@ class PipelineParams(ParamGroup):
         self.sph_residual_keyframes = 0
         self.sph_residual_from_iter = 20_000
         self.sph_hierarchy_bands = ""
+        self.sph_parity_bands = ""
         self.sph_time_min = -1.0
         self.sph_time_max = -1.0
         super().__init__(parser, "Pipeline Parameters")

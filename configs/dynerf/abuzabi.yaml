@@ -34,8 +34,11 @@ PipelineParams:
   temporal_flat_radius_mult: 1.0
   sph_residual_keyframes: 0
   sph_residual_from_iter: 20_000
-  # 8 static ch + 4ch@5kf (~0.5s) + 3ch@15kf (~4 frames) + 1ch@30kf (~2 frames), lerped
-  sph_hierarchy_bands: "4@4,4@8,4@16,4@32"
+  sph_hierarchy_bands: ""
+  # parity-slot dynamic sph keyframes: 8 channels @ 10 keyframes; the two
+  # hat-weighted adjacent keyframe samples (even/odd slots) + blend weights are
+  # fed to light_mlp so the temporal blend is learned instead of lerped
+  sph_parity_bands: "16@10"
   sph_time_min: 0.6666666666666666
   sph_time_max: 2.6333333333333333
 
@@ -92,7 +95,7 @@ OptimizationParams:
   temporal_flat_radius_ramp_start: 25_000
   temporal_flat_radius_ramp_end: 40_000
   temporal_flat_radius_loss_weight: 0.05
-  train_num_workers: 8
+  train_num_workers: 6
   debug_interval: 200
   local_branch_lazy_init: True
   densify_until_num_points: -1

@@ -69,7 +69,7 @@ class SphMipEncoding(nn.Module):
         n_levels: int = 8,
         plane_size: int = 512,
         #feature_dim: int = 16,
-        feature_dim: int = 32,
+        feature_dim: int = 16,
         Sn: int = 1,
         dim: int = 1,
         rand_init: bool = False,
@@ -78,6 +78,7 @@ class SphMipEncoding(nn.Module):
         residual_keyframes: int = 0,
         residual_start_iteration: int = 0,
         residual_bands=None,
+        parity_bands=None,
     ):
         super(SphMipEncoding, self).__init__()
         self.n_levels = n_levels
@@ -100,6 +101,12 @@ class SphMipEncoding(nn.Module):
         parsed_bands = _parse_sph_band_spec(residual_bands)
         if parsed_bands:
             self._create_residual_bands(parsed_bands)
+
+        self.fm_parity = None
+        self.parity_spec = None
+        parsed_parity = _parse_sph_band_spec(parity_bands)
+        if parsed_parity:
+            self._create_parity_keyframes(*parsed_parity[0])
 
     def _create_residual_keyframes(self, residual_keyframes):
         base = self.fm
@@ -224,6 +231,69 @@ class SphMipEncoding(nn.Module):
             pieces.append(band_fm)
         return torch.cat(pieces, dim=-1)
 
+    def _create_parity_keyframes(self, channels, keyframes):
+        """Parity-slot dynamic keyframes: a sparse stack of C-channel env maps at K
+        keyframes.  Instead of lerping the maps, the two keyframes adjacent to the
+        query time are hat-weighted and routed to two fixed decoder slots (even
+        keyframe index -> slot A, odd -> slot B) so the light MLP sees both
+        endpoints plus the blend weights while its input stays continuous in
+        time (the outgoing map's weight reaches zero exactly when slot contents
+        swap at a crossing)."""
+        base = self.fm
+        channels = int(channels)
+        keyframes = max(1, int(keyframes))
+        self.parity_spec = (channels, keyframes)
+        self.fm_parity = nn.ParameterList([
+            nn.Parameter(torch.zeros(*base.shape[1:-1], channels, dtype=base.dtype, device=base.device))
+            for _ in range(keyframes)
+        ])
+        per_map_mb = base.shape[1:-1].numel() * channels * base.element_size() / (1024 ** 2)
+        print(f"[SphMipEncoding] Parity-slot dynamic keyframes: {channels}ch @ {keyframes}kf "
+              f"({per_map_mb:.1f} MB each, {per_map_mb * keyframes:.1f} MB total, zero-init).")
+
+    def ensure_parity_keyframes(self, parity_bands, time_min=None, time_max=None):
+        """Idempotent setup of parity-slot dynamic keyframes.  Also upgrades
+        dir_encoding modules unpickled from checkpoints that predate the feature
+        and refreshes the time range mapping."""
+        if time_min is not None:
+            self.time_min = float(time_min)
+        if time_max is not None:
+            self.time_max = float(time_max)
+        parsed = _parse_sph_band_spec(parity_bands)
+        if not parsed:
+            return
+        channels, keyframes = int(parsed[0][0]), max(1, int(parsed[0][1]))
+        existing = getattr(self, "fm_parity", None)
+        if existing is not None and len(existing) > 0 and getattr(self, "parity_spec", None) == (channels, keyframes):
+            return
+        if existing is not None and len(existing) > 0:
+            print(f"[SphMipEncoding] Parity keyframe spec changed "
+                  f"{getattr(self, 'parity_spec', None)} -> {(channels, keyframes)}; parameters reset.")
+        self._create_parity_keyframes(channels, keyframes)
+
+    @property
+    def parity_channels(self):
+        fm_parity = getattr(self, "fm_parity", None)
+        if fm_parity is None or len(fm_parity) == 0:
+            return 0
+        return fm_parity[0].shape[-1]
+
+    def get_parity_slot_weights(self, timestamp):
+        """Hat weights routed to parity slots: even-index keyframes always occupy
+        slot A, odd-index keyframes slot B.  Returns (slot_a_idx, slot_b_idx,
+        w_a, w_b).  Both the weighted slot features and the weight scalars are
+        continuous across keyframe crossings."""
+        fm_parity = getattr(self, "fm_parity", None)
+        key_count = 0 if fm_parity is None else len(fm_parity)
+        if key_count == 0 or timestamp is None:
+            return 0, 0, 0.0, 0.0
+        if key_count == 1:
+            return 0, 0, 1.0, 0.0
+        key0, key1, alpha = self._get_band_keyframe_weights(timestamp, key_count)
+        if key0 % 2 == 0:
+            return key0, key1, 1.0 - alpha, alpha
+        return key1, key0, alpha, 1.0 - alpha
+
     def ensure_residual_keyframes(self, residual_keyframes, time_min=None, time_max=None, start_iteration=None):
         """Idempotent setup of time-switched residual keyframes.
 
@@ -339,6 +409,18 @@ class SphMipEncoding(nn.Module):
             if not getattr(self, "bands_are_direct", False):
                 self._upgrade_residual_bands_to_direct()
             fm = self._compose_hierarchical_bands(fm, timestamp)
+
+        # Parity-slot dynamic keyframes: the two hat-weighted adjacent keyframe
+        # maps are appended as extra channels (slot A = even keyframes, slot B =
+        # odd) so the light MLP can decode both endpoints + blend weights instead
+        # of consuming a pre-lerped map.  Weighting before sampling equals
+        # weighting after (texture sampling is linear per channel).
+        fm_parity = getattr(self, "fm_parity", None)
+        if fm_parity is not None and len(fm_parity) > 0:
+            slot_a_idx, slot_b_idx, w_a, w_b = self.get_parity_slot_weights(timestamp)
+            slot_a = fm_parity[slot_a_idx] * w_a
+            slot_b = fm_parity[slot_b_idx] * w_b
+            fm = torch.cat([fm, slot_a, slot_b], dim=-1)
 
         return self._sample_feature_map(fm, decomposed_x, level)
 
@@ -484,6 +566,7 @@ class GaussianModel:
         self.sph_residual_keyframes = 0
         self.sph_residual_from_iter = 0
         self.sph_hierarchy_bands = ""
+        self.sph_parity_bands = ""
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -514,9 +597,15 @@ class GaussianModel:
             residual_keyframes=getattr(self, "sph_residual_keyframes", 0),
             residual_start_iteration=getattr(self, "sph_residual_from_iter", 0),
             residual_bands=getattr(self, "sph_hierarchy_bands", ""),
+            parity_bands=getattr(self, "sph_parity_bands", ""),
         ).cuda()
+        light_mlp_in_dim = self.sph_dim * self.gsdim + self.sph_dim
+        parity_channels = self.dir_encoding.parity_channels
+        if parity_channels > 0:
+            # [spec_feat, f (x) s_static, f (x) (w_a * s_slotA), f (x) (w_b * s_slotB), w_a, w_b]
+            light_mlp_in_dim += 2 * parity_channels * self.gsdim + 2
         self.light_mlp = nn.Sequential(
-            nn.Linear(self.sph_dim * self.gsdim + self.sph_dim, run_dim),
+            nn.Linear(light_mlp_in_dim, run_dim),
             nn.ReLU(inplace=True),
             nn.Linear(run_dim, run_dim),
             nn.ReLU(inplace=True),
@@ -627,6 +716,39 @@ class GaussianModel:
         # ).cuda()
         # nn.init.constant_(self.light_mlp_2.fc_out.bias, np.log(0.25))
         self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
+
+    def ensure_parity_light_env(self):
+        """Idempotent setup/upgrade of parity-slot dynamic sph keyframes: creates
+        the keyframe stack on dir_encoding and widens light_mlp's first linear
+        layer with zero-init columns for the new inputs (function-preserving for
+        modules unpickled from older checkpoints).  Must run before
+        training_setup so the new params join the optimizer."""
+        parity_bands = getattr(self, "sph_parity_bands", "")
+        if not parity_bands or self.dir_encoding is None or self.light_mlp is None:
+            return
+        self.dir_encoding.ensure_parity_keyframes(
+            parity_bands,
+            time_min=getattr(self, "sph_time_min", None),
+            time_max=getattr(self, "sph_time_max", None),
+        )
+        parity_channels = self.dir_encoding.parity_channels
+        if parity_channels <= 0 or not isinstance(self.light_mlp, nn.Sequential):
+            return
+        expected_in = self.sph_dim * self.gsdim + self.sph_dim + 2 * parity_channels * self.gsdim + 2
+        first = self.light_mlp[0]
+        if first.in_features == expected_in:
+            return
+        if first.in_features > expected_in:
+            raise ValueError(f"[GaussianModel] light_mlp input {first.in_features} exceeds expected {expected_in}; "
+                             f"checkpoint was trained with a larger parity spec.")
+        new_first = nn.Linear(expected_in, first.out_features).to(first.weight.device, first.weight.dtype)
+        with torch.no_grad():
+            new_first.weight.zero_()
+            new_first.weight[:, :first.in_features].copy_(first.weight)
+            new_first.bias.copy_(first.bias)
+        self.light_mlp[0] = new_first
+        print(f"[GaussianModel] light_mlp input widened {first.in_features} -> {expected_in} "
+              f"for parity keyframes (zero-init new columns).")
 
     def capture(self):
         if self.gaussian_dim == 3:
@@ -2347,7 +2469,7 @@ class GaussianModel:
                 l.append({'params': [self._rot_velocity], 'lr': training_args.rotation_lr, "name": "rot_velocity"})
                 l.append({'params': [self._specular], 'lr': training_args.feature_lr * 5, "name": "specular"})
                 l.append({'params': [self._albedo], 'lr': training_args.albedo_lr, "name": "albedo"})
-                l.append({'params': [self._specular2], 'lr': training_args.feature_lr, "name": "specular2"})
+                l.append({'params': [self._specular2], 'lr': training_args.feature_lr / 2, "name": "specular2"})
                 l.append({'params': [self._delta_normal], 'lr': training_args.delta_normal_lr, "name": "delta_normal"})
                 l.append({'params': [self._roughness], 'lr': training_args.roughness_lr, "name": "roughness"})
                 l.append({'params': list(self.brdf_mlp.parameters()), 'lr': training_args.brdf_mlp_lr_init, "name": "brdf_mlp"})
@@ -2402,8 +2524,8 @@ class GaussianModel:
                                                     lr_final=training_args.feature_lr,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        self.specular_feature_coeff_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr,
-                                                    lr_final=training_args.feature_lr / 2,
+        self.specular_feature_coeff_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_lr / 2,
+                                                    lr_final=training_args.feature_lr / 4,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
 
