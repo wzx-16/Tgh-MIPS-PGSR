@@ -38,7 +38,16 @@ PipelineParams:
   # parity-slot dynamic sph keyframes: 8 channels @ 10 keyframes; the two
   # hat-weighted adjacent keyframe samples (even/odd slots) + blend weights are
   # fed to light_mlp so the temporal blend is learned instead of lerped
-  sph_parity_bands: "16@10"
+  sph_parity_bands: ""
+  # sliding-window dynamic sph keyframes (alternative to parity mode): C@K maps
+  # decoded through W slots; each slot holds the tent-weighted (half-width W/2
+  # keyframes) sample of the nearest keyframe with index = slot mod W, so slot
+  # occupants change one at a time; the W weighted samples enter light_mlp as
+  # outer products with the per-gaussian gsdim feature (W*C*gsdim dims, so the
+  # dynamic signal is gated per material) plus the W alphas.  e.g. "1@60" with
+  # 8 slots and gsdim 4 = 32-dim dynamic input + 8 alphas
+  sph_sliding_bands: "1@60"
+  sph_sliding_window: 8
   sph_time_min: 0.6666666666666666
   sph_time_max: 2.6333333333333333
 
@@ -95,7 +104,7 @@ OptimizationParams:
   temporal_flat_radius_ramp_start: 25_000
   temporal_flat_radius_ramp_end: 40_000
   temporal_flat_radius_loss_weight: 0.05
-  train_num_workers: 6
+  train_num_workers: 4
   debug_interval: 200
   local_branch_lazy_init: True
   densify_until_num_points: -1

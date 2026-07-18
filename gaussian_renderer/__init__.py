@@ -935,10 +935,13 @@ def render_3d_pgsr_anti(
         spec_level = rendered_roughness.reshape(-1, 1)[select_index]
 
         parity_channels = getattr(pc.dir_encoding, "parity_channels", 0)
-        sample_dim = pc.sph_dim + 2 * parity_channels
+        sliding_channels = getattr(pc.dir_encoding, "sliding_channels", 0)
+        sliding_slots = getattr(pc.dir_encoding, "sliding_slots", 0)
+        sample_dim = pc.sph_dim + 2 * parity_channels + sliding_slots * sliding_channels
         spec_feat_all = pc.dir_encoding(wo_xyz, spec_level.view(-1, 1), index=0, timestamp=timestamp, iteration=iteration).reshape(-1, sample_dim)
         spec_feat = spec_feat_all[:, :pc.sph_dim]
-        spec_feat_parity = spec_feat_all[:, pc.sph_dim:]
+        spec_feat_parity = spec_feat_all[:, pc.sph_dim:pc.sph_dim + 2 * parity_channels]
+        spec_feat_sliding = spec_feat_all[:, pc.sph_dim + 2 * parity_channels:]
         #wo = -rays_d
         #wo_xy = (cart2sph(reflec_dir_selected.reshape(-1, 3)[..., [2,1,0]])[..., 1:] / torch.Tensor([[np.pi, 2*np.pi]]).cuda())[..., [1,0]] 
         spec_feat_wrap = spec_feat.reshape(-1, pc.sph_dim, 1)
@@ -988,6 +991,7 @@ def render_3d_pgsr_anti(
             #     [local_feature_selected, roughness_selected, cos_nr],
             #     dim=-1,
             # )
+            input_mlp_pieces = [spec_feat, sph_outer_feature]
             if parity_channels > 0:
                 # Parity-slot dynamic keyframes: hat-weighted even/odd keyframe slot
                 # samples (already weighted inside dir_encoding) enter as their own
@@ -997,9 +1001,21 @@ def render_3d_pgsr_anti(
                 parity_outer = (spec_feat_parity.reshape(-1, 2 * parity_channels, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, 2 * parity_channels * pc.gsdim)
                 _, _, parity_w_a, parity_w_b = pc.dir_encoding.get_parity_slot_weights(timestamp)
                 parity_w = spec_feat.new_tensor([parity_w_a, parity_w_b]).expand(spec_feat.shape[0], 2)
-                input_mlp_base = torch.cat([spec_feat, sph_outer_feature, parity_outer, parity_w], dim=-1)
-            else:
-                input_mlp_base = torch.cat([spec_feat, sph_outer_feature], dim=-1)
+                input_mlp_pieces += [parity_outer, parity_w]
+            if sliding_slots > 0:
+                # Sliding-window dynamic keyframes: the W tent-weighted slot samples
+                # (already alpha-weighted inside dir_encoding) enter as outer
+                # products with the per-gaussian feature — same as the static and
+                # parity paths — plus the W alphas, so the dynamic env signal is
+                # gated per gaussian/material instead of being global; slot
+                # occupants change one keyframe at a time and swap at zero weight,
+                # so all inputs are continuous in time.
+                sliding_dim = sliding_slots * sliding_channels
+                sliding_outer = (spec_feat_sliding.reshape(-1, sliding_dim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, sliding_dim * pc.gsdim)
+                _, sliding_weights = pc.dir_encoding.get_sliding_slot_weights(timestamp)
+                sliding_w = spec_feat.new_tensor(sliding_weights).expand(spec_feat.shape[0], sliding_slots)
+                input_mlp_pieces += [sliding_outer, sliding_w]
+            input_mlp_base = torch.cat(input_mlp_pieces, dim=-1)
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
             #     dim=-1,

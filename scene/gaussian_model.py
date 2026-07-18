@@ -79,6 +79,8 @@ class SphMipEncoding(nn.Module):
         residual_start_iteration: int = 0,
         residual_bands=None,
         parity_bands=None,
+        sliding_bands=None,
+        sliding_window: int = 16,
     ):
         super(SphMipEncoding, self).__init__()
         self.n_levels = n_levels
@@ -107,6 +109,13 @@ class SphMipEncoding(nn.Module):
         parsed_parity = _parse_sph_band_spec(parity_bands)
         if parsed_parity:
             self._create_parity_keyframes(*parsed_parity[0])
+
+        self.fm_sliding = None
+        self.sliding_spec = None
+        self.sliding_window = max(1, int(sliding_window))
+        parsed_sliding = _parse_sph_band_spec(sliding_bands)
+        if parsed_sliding:
+            self._create_sliding_keyframes(*parsed_sliding[0], self.sliding_window)
 
     def _create_residual_keyframes(self, residual_keyframes):
         base = self.fm
@@ -294,6 +303,107 @@ class SphMipEncoding(nn.Module):
             return key0, key1, 1.0 - alpha, alpha
         return key1, key0, alpha, 1.0 - alpha
 
+    def _create_sliding_keyframes(self, channels, keyframes, window):
+        """Sliding-window dynamic keyframes: a stack of C-channel env maps at K
+        keyframes decoded through W fixed slots.  Slot s always holds the
+        keyframe with index congruent to s (mod W) nearest to the query time,
+        tent-weighted with half-width W/2 keyframe intervals, so up to W
+        keyframes are visible to the light MLP simultaneously and a slot swaps
+        its occupant exactly when its weight is zero (contents change one
+        keyframe at a time; the weighted features stay continuous in time)."""
+        base = self.fm
+        channels = int(channels)
+        keyframes = max(1, int(keyframes))
+        window = max(1, int(window))
+        self.sliding_spec = (channels, keyframes)
+        self.sliding_window = window
+        self.fm_sliding = nn.ParameterList([
+            nn.Parameter(torch.zeros(*base.shape[1:-1], channels, dtype=base.dtype, device=base.device))
+            for _ in range(keyframes)
+        ])
+        per_map_mb = base.shape[1:-1].numel() * channels * base.element_size() / (1024 ** 2)
+        print(f"[SphMipEncoding] Sliding-window dynamic keyframes: {channels}ch @ {keyframes}kf, "
+              f"{window} slots ({per_map_mb:.1f} MB each, {per_map_mb * keyframes:.1f} MB total, zero-init).")
+
+    def ensure_sliding_keyframes(self, sliding_bands, sliding_window=None, time_min=None, time_max=None):
+        """Idempotent setup of sliding-window dynamic keyframes.  Also upgrades
+        dir_encoding modules unpickled from checkpoints that predate the feature
+        and refreshes the time range mapping."""
+        if time_min is not None:
+            self.time_min = float(time_min)
+        if time_max is not None:
+            self.time_max = float(time_max)
+        parsed = _parse_sph_band_spec(sliding_bands)
+        if not parsed:
+            return
+        channels, keyframes = int(parsed[0][0]), max(1, int(parsed[0][1]))
+        window = max(1, int(sliding_window if sliding_window is not None else getattr(self, "sliding_window", 16)))
+        existing = getattr(self, "fm_sliding", None)
+        if existing is not None and len(existing) > 0 and getattr(self, "sliding_spec", None) == (channels, keyframes):
+            if int(getattr(self, "sliding_window", 0)) != window:
+                print(f"[SphMipEncoding] Sliding window changed "
+                      f"{getattr(self, 'sliding_window', None)} -> {window} (keyframe stack kept).")
+                self.sliding_window = window
+            return
+        if existing is not None and len(existing) > 0:
+            print(f"[SphMipEncoding] Sliding keyframe spec changed "
+                  f"{getattr(self, 'sliding_spec', None)} -> {(channels, keyframes)}; parameters reset.")
+        self._create_sliding_keyframes(channels, keyframes, window)
+
+    @property
+    def sliding_channels(self):
+        fm_sliding = getattr(self, "fm_sliding", None)
+        if fm_sliding is None or len(fm_sliding) == 0:
+            return 0
+        return fm_sliding[0].shape[-1]
+
+    @property
+    def sliding_slots(self):
+        fm_sliding = getattr(self, "fm_sliding", None)
+        if fm_sliding is None or len(fm_sliding) == 0:
+            return 0
+        return max(1, int(getattr(self, "sliding_window", 16)))
+
+    def get_sliding_slot_weights(self, timestamp):
+        """Sliding-window slot routing.  For each of the W slots, pick the
+        keyframe with index congruent to the slot (mod W) nearest to the query
+        time and tent-weight it with half-width W/2 keyframe intervals:
+        alpha_s = max(0, 1 - |t_seg - k_s| / (W/2)).  Two keyframes sharing a
+        slot are W intervals apart, so both can never be inside the open window
+        at once, and an occupant swap happens exactly at zero weight -> the
+        weighted slot features and the weights are continuous in time and only
+        one slot changes occupant at a time.  Returns (indices, weights)."""
+        fm_sliding = getattr(self, "fm_sliding", None)
+        key_count = 0 if fm_sliding is None else len(fm_sliding)
+        window = max(1, int(getattr(self, "sliding_window", 16)))
+        if key_count == 0:
+            return [], []
+        if timestamp is None:
+            return [0] * window, [0.0] * window
+        if torch.is_tensor(timestamp):
+            time_value = float(timestamp.detach().reshape(-1)[0].item())
+        else:
+            time_value = float(timestamp)
+        time_min = float(getattr(self, "time_min", 0.0))
+        time_max = float(getattr(self, "time_max", 1.0))
+        denom = max(time_max - time_min, 1.0e-6)
+        normalized_t = min(max((time_value - time_min) / denom, 0.0), 1.0)
+        t_seg = normalized_t * (key_count - 1) if key_count > 1 else 0.0
+        half_width = window / 2.0
+        indices, weights = [], []
+        for slot in range(window):
+            if slot >= key_count:
+                indices.append(0)
+                weights.append(0.0)
+                continue
+            steps = round((t_seg - slot) / window)
+            max_steps = (key_count - 1 - slot) // window
+            steps = min(max(steps, 0), max_steps)
+            key = slot + steps * window
+            indices.append(key)
+            weights.append(max(0.0, 1.0 - abs(t_seg - key) / half_width))
+        return indices, weights
+
     def ensure_residual_keyframes(self, residual_keyframes, time_min=None, time_max=None, start_iteration=None):
         """Idempotent setup of time-switched residual keyframes.
 
@@ -421,6 +531,17 @@ class SphMipEncoding(nn.Module):
             slot_a = fm_parity[slot_a_idx] * w_a
             slot_b = fm_parity[slot_b_idx] * w_b
             fm = torch.cat([fm, slot_a, slot_b], dim=-1)
+
+        # Sliding-window dynamic keyframes: the W tent-weighted slot maps (slot s
+        # = nearest keyframe with index = s mod W) are appended as W*C extra
+        # channels sampled in the same texture call; occupants change one at a
+        # time and swap exactly at zero weight, so the sampled features stay
+        # continuous in time.
+        fm_sliding = getattr(self, "fm_sliding", None)
+        if fm_sliding is not None and len(fm_sliding) > 0:
+            slot_indices, slot_weights = self.get_sliding_slot_weights(timestamp)
+            slot_maps = [fm_sliding[k] * w for k, w in zip(slot_indices, slot_weights)]
+            fm = torch.cat([fm] + slot_maps, dim=-1)
 
         return self._sample_feature_map(fm, decomposed_x, level)
 
@@ -567,6 +688,8 @@ class GaussianModel:
         self.sph_residual_from_iter = 0
         self.sph_hierarchy_bands = ""
         self.sph_parity_bands = ""
+        self.sph_sliding_bands = ""
+        self.sph_sliding_window = 16
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -598,12 +721,18 @@ class GaussianModel:
             residual_start_iteration=getattr(self, "sph_residual_from_iter", 0),
             residual_bands=getattr(self, "sph_hierarchy_bands", ""),
             parity_bands=getattr(self, "sph_parity_bands", ""),
+            sliding_bands=getattr(self, "sph_sliding_bands", ""),
+            sliding_window=getattr(self, "sph_sliding_window", 16),
         ).cuda()
         light_mlp_in_dim = self.sph_dim * self.gsdim + self.sph_dim
         parity_channels = self.dir_encoding.parity_channels
         if parity_channels > 0:
             # [spec_feat, f (x) s_static, f (x) (w_a * s_slotA), f (x) (w_b * s_slotB), w_a, w_b]
             light_mlp_in_dim += 2 * parity_channels * self.gsdim + 2
+        sliding_slots = self.dir_encoding.sliding_slots
+        if sliding_slots > 0:
+            # [..., f (x) (alpha_s * s_0..s_{W-1}), alpha_0..alpha_{W-1}]
+            light_mlp_in_dim += sliding_slots * self.dir_encoding.sliding_channels * self.gsdim + sliding_slots
         self.light_mlp = nn.Sequential(
             nn.Linear(light_mlp_in_dim, run_dim),
             nn.ReLU(inplace=True),
@@ -718,29 +847,58 @@ class GaussianModel:
         self.brdf_mlp = create_trainable_env_rnd(16, scale=0.0, bias=0.8)
 
     def ensure_parity_light_env(self):
-        """Idempotent setup/upgrade of parity-slot dynamic sph keyframes: creates
-        the keyframe stack on dir_encoding and widens light_mlp's first linear
-        layer with zero-init columns for the new inputs (function-preserving for
-        modules unpickled from older checkpoints).  Must run before
-        training_setup so the new params join the optimizer."""
+        """Idempotent setup/upgrade of the dynamic sph keyframe modes (parity
+        slots and/or sliding window): creates the keyframe stacks on
+        dir_encoding and widens light_mlp's first linear layer with zero-init
+        columns for the new inputs (function-preserving for modules unpickled
+        from older checkpoints, provided new input blocks are enabled in append
+        order [parity, sliding]).  Must run before training_setup so the new
+        params join the optimizer."""
         parity_bands = getattr(self, "sph_parity_bands", "")
-        if not parity_bands or self.dir_encoding is None or self.light_mlp is None:
+        sliding_bands = getattr(self, "sph_sliding_bands", "")
+        if (not parity_bands and not sliding_bands) or self.dir_encoding is None or self.light_mlp is None:
             return
-        self.dir_encoding.ensure_parity_keyframes(
-            parity_bands,
-            time_min=getattr(self, "sph_time_min", None),
-            time_max=getattr(self, "sph_time_max", None),
-        )
+        if parity_bands:
+            self.dir_encoding.ensure_parity_keyframes(
+                parity_bands,
+                time_min=getattr(self, "sph_time_min", None),
+                time_max=getattr(self, "sph_time_max", None),
+            )
+        if sliding_bands:
+            self.dir_encoding.ensure_sliding_keyframes(
+                sliding_bands,
+                sliding_window=getattr(self, "sph_sliding_window", 16),
+                time_min=getattr(self, "sph_time_min", None),
+                time_max=getattr(self, "sph_time_max", None),
+            )
+        if not isinstance(self.light_mlp, nn.Sequential):
+            return
         parity_channels = self.dir_encoding.parity_channels
-        if parity_channels <= 0 or not isinstance(self.light_mlp, nn.Sequential):
-            return
-        expected_in = self.sph_dim * self.gsdim + self.sph_dim + 2 * parity_channels * self.gsdim + 2
+        sliding_slots = self.dir_encoding.sliding_slots
+        expected_in = self.sph_dim * self.gsdim + self.sph_dim
+        if parity_channels > 0:
+            expected_in += 2 * parity_channels * self.gsdim + 2
+        sliding_dim = sliding_slots * self.dir_encoding.sliding_channels if sliding_slots > 0 else 0
+        if sliding_slots > 0:
+            expected_in += sliding_dim * self.gsdim + sliding_slots
         first = self.light_mlp[0]
         if first.in_features == expected_in:
             return
         if first.in_features > expected_in:
             raise ValueError(f"[GaussianModel] light_mlp input {first.in_features} exceeds expected {expected_in}; "
-                             f"checkpoint was trained with a larger parity spec.")
+                             f"checkpoint was trained with a larger dynamic sph spec.")
+        # Zero-init widening is only function-preserving from a prefix of the
+        # current layout: static-only, or static+parity when sliding is newly
+        # added.  Any other width (legacy raw-concat sliding, a different
+        # window/channel spec) would have its columns silently reinterpreted.
+        valid_prefixes = {self.sph_dim * self.gsdim + self.sph_dim}
+        if parity_channels > 0:
+            valid_prefixes.add(self.sph_dim * self.gsdim + self.sph_dim + 2 * parity_channels * self.gsdim + 2)
+        if first.in_features not in valid_prefixes:
+            raise ValueError(f"[GaussianModel] light_mlp input {first.in_features} matches neither the current "
+                             f"layout ({expected_in}) nor a function-preserving prefix ({sorted(valid_prefixes)}); "
+                             f"the checkpoint used a different dynamic sph layout (e.g. legacy raw-concat sliding "
+                             f"or another window/channel spec). Retrain from scratch.")
         new_first = nn.Linear(expected_in, first.out_features).to(first.weight.device, first.weight.dtype)
         with torch.no_grad():
             new_first.weight.zero_()
@@ -748,7 +906,7 @@ class GaussianModel:
             new_first.bias.copy_(first.bias)
         self.light_mlp[0] = new_first
         print(f"[GaussianModel] light_mlp input widened {first.in_features} -> {expected_in} "
-              f"for parity keyframes (zero-init new columns).")
+              f"for dynamic sph keyframes (zero-init new columns).")
 
     def capture(self):
         if self.gaussian_dim == 3:
