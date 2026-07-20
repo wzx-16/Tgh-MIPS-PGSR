@@ -732,7 +732,7 @@ class GaussianModel:
         sliding_slots = self.dir_encoding.sliding_slots
         if sliding_slots > 0:
             # [..., f (x) (alpha_s * s_0..s_{W-1}), alpha_0..alpha_{W-1}]
-            light_mlp_in_dim += sliding_slots * self.dir_encoding.sliding_channels * self.gsdim + sliding_slots
+            light_mlp_in_dim += sliding_slots + sliding_slots * self.dir_encoding.sliding_channels * self.gsdim + sliding_slots 
         self.light_mlp = nn.Sequential(
             nn.Linear(light_mlp_in_dim, run_dim),
             nn.ReLU(inplace=True),
@@ -880,7 +880,7 @@ class GaussianModel:
             expected_in += 2 * parity_channels * self.gsdim + 2
         sliding_dim = sliding_slots * self.dir_encoding.sliding_channels if sliding_slots > 0 else 0
         if sliding_slots > 0:
-            expected_in += sliding_dim * self.gsdim + sliding_slots
+            expected_in += sliding_slots + sliding_dim * self.gsdim + sliding_slots
         first = self.light_mlp[0]
         if first.in_features == expected_in:
             return

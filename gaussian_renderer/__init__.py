@@ -1014,7 +1014,7 @@ def render_3d_pgsr_anti(
                 sliding_outer = (spec_feat_sliding.reshape(-1, sliding_dim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, sliding_dim * pc.gsdim)
                 _, sliding_weights = pc.dir_encoding.get_sliding_slot_weights(timestamp)
                 sliding_w = spec_feat.new_tensor(sliding_weights).expand(spec_feat.shape[0], sliding_slots)
-                input_mlp_pieces += [sliding_outer, sliding_w]
+                input_mlp_pieces += [spec_feat_sliding, sliding_outer, sliding_w]
             input_mlp_base = torch.cat(input_mlp_pieces, dim=-1)
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],
