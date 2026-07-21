@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import gc
 import math
 import os
 import random
@@ -258,7 +259,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if gaussians.sph_sliding_bands:
         print(f"Sph sliding-window dynamic keyframes: {gaussians.sph_sliding_bands}, "
               f"{gaussians.sph_sliding_window} slots over "
-              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}] (tent-weighted slot samples + alphas into light_mlp)")
+              f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}] (tent-weighted slot samples + outer products + alphas into light_mlp)")
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     if gaussians.sph_residual_keyframes > 0 and gaussians.dir_encoding is not None:
@@ -340,6 +341,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             setup_restored_local_gaussian_model(local_gaussians, opt)
             print("Using restored local Gaussian checkpoint.")
+        # The checkpoint payload aliases the live CUDA param/Adam tensors; keeping
+        # it referenced for the rest of training() pins the entire resume-time
+        # generation on the GPU once the first densify/split retires those tensors.
+        del model_params, local_model_params
+        gc.collect()
     else:
         gaussian_init_flag = False
         gaussians.training_setup(opt)
@@ -391,7 +397,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         collate_fn=lambda x: x,
         drop_last=True,
         pin_memory=True,
-        persistent_workers=train_num_workers > 0,
+        persistent_workers=False,
         prefetch_factor=4 if train_num_workers > 0 else None,
     )
     #print("test6")
@@ -1220,7 +1226,21 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.add_densification_stats_pgsr(viewspace_point_tensor, viewspace_point_tensor_abs, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None, add_specular_grads)
                     else:
                         gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
-                        
+
+                    if iteration > opt.densify_from_iter and iteration % (densification_interval // 2) == 0:
+                        # The optimizer surgery below retires parameter tensors, but graph
+                        # branches of this iteration's render that backward() never reached
+                        # (feature/normal/debug maps unused by the loss) still hold saved
+                        # references to them; unless the holders are dropped first, every
+                        # densify/split pins the retired parameter generation (+ its Adam
+                        # state) on the GPU and the leak compounds across events.
+                        xyz = shs = opacity = opacity_render = mt = ma = local_mt = local_ma = None
+                        view_pos = d_viewdir_normalized = normal = reflvec = dir_pp = dir_pp_normalized = None
+                        render_pkg = image = feature_map = rendered_delta_normal = rendered_local_feature_map = None
+                        spec_coeff = render_normal = loss = Ll1 = Lssim = None
+                        viewspace_point_tensor = viewspace_point_tensor_abs = None
+                        gc.collect()
+
                     #if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and (iteration < 3000 or iteration > 6000):
                     # if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or (iteration > opt.densify_from_iter2 and iteration <= opt.densify_until_iter2)) and (iteration % densification_interval == 0):
                     if (global_densify_active or global_temporal_split_active) and iteration > opt.densify_from_iter and (iteration % densification_interval == 0):
@@ -1320,6 +1340,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     gaussians.reset_param_groups()
                     gaussians.append_state_from_gaussians_cpu(gaussians_segments, state_dict)
                     initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=local_branch_lazy_init)
+                    # The hierarchy segments duplicate the initial model (params +
+                    # Adam states, ~3 GiB CUDA) and are only read by the two appends
+                    # above; evict them to CPU for the rest of training.
+                    for level_segments in tgh.layers:
+                        for segment in level_segments:
+                            for attr, value in list(vars(segment).items()):
+                                if torch.is_tensor(value) and value.is_cuda:
+                                    setattr(segment, attr, value.detach().cpu())
+                                elif isinstance(value, dict):
+                                    for state in value.values():
+                                        if isinstance(state, dict):
+                                            for key, tensor in list(state.items()):
+                                                if torch.is_tensor(tensor) and tensor.is_cuda:
+                                                    state[key] = tensor.detach().cpu()
+                    # Same pinning hazard as the checkpoint payload: these hold the
+                    # iteration-1 param/Adam generation for the rest of training().
+                    del state_dict, gaussians_segments
+                    gc.collect()
+                    torch.cuda.empty_cache()
                 # if save_flag:
                     #torch.save((tgh.capture(gaussians), iteration), scene.model_path + "/tgh_chkpnt_best_after_prune.pth")
                 #cuda_to_cpu_end = time.time()

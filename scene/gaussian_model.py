@@ -731,8 +731,9 @@ class GaussianModel:
             light_mlp_in_dim += 2 * parity_channels * self.gsdim + 2
         sliding_slots = self.dir_encoding.sliding_slots
         if sliding_slots > 0:
-            # [..., f (x) (alpha_s * s_0..s_{W-1}), alpha_0..alpha_{W-1}]
-            light_mlp_in_dim += sliding_slots + sliding_slots * self.dir_encoding.sliding_channels * self.gsdim + sliding_slots 
+            # [..., alpha_s * s_0..s_{W-1}, f (x) (alpha_s * s_0..s_{W-1}), alpha_0..alpha_{W-1}]
+            sliding_dim = sliding_slots * self.dir_encoding.sliding_channels
+            light_mlp_in_dim += sliding_dim + sliding_dim * self.gsdim + sliding_slots
         self.light_mlp = nn.Sequential(
             nn.Linear(light_mlp_in_dim, run_dim),
             nn.ReLU(inplace=True),
@@ -880,7 +881,7 @@ class GaussianModel:
             expected_in += 2 * parity_channels * self.gsdim + 2
         sliding_dim = sliding_slots * self.dir_encoding.sliding_channels if sliding_slots > 0 else 0
         if sliding_slots > 0:
-            expected_in += sliding_slots + sliding_dim * self.gsdim + sliding_slots
+            expected_in += sliding_dim + sliding_dim * self.gsdim + sliding_slots
         first = self.light_mlp[0]
         if first.in_features == expected_in:
             return
@@ -3417,6 +3418,15 @@ class GaussianModel:
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False):
+        # Every per-gaussian parameter gets replaced by a new nn.Parameter below
+        # (grad=None), so the optimizer step that follows can never consume the
+        # old .grad buffers; dropping them first removes a params-worth of
+        # memory from the surgery peak.  Module groups keep theirs.
+        for group in self.optimizer.param_groups:
+            if group["name"] in ("brdf_mlp", "light_mlp", "light_mlp2", "dir_encoding"):
+                continue
+            for param in group["params"]:
+                param.grad = None
         #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
         ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
         #ENV_RADIUS = 1.6
