@@ -162,6 +162,13 @@ class OptimizationParams(ParamGroup):
         self.lambda_opa_mask = 0.0
         self.lambda_rigid = 0.0
         self.lambda_motion = 0.0
+        # Per-camera affine color compensation (PGSR-style): exp(a)*render + b
+        # applied to the L1 term only for TRAIN cameras; test views always render
+        # uncompensated.  Off by default.
+        self.cam_affine_enable = False
+        self.cam_affine_lr = 0.001
+        self.cam_affine_from_iter = 1000
+        self.cam_affine_ssim_gate = 0.5
 
         super().__init__(parser, "Optimization Parameters")
 

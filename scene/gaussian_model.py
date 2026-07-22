@@ -674,6 +674,10 @@ class GaussianModel:
         self.temporal_schedule_iteration = None
 
         
+        # 16-dim env feature. This is the single knob that controls the feature
+        # dim (init_light_env passes it explicitly into SphMipEncoding and derives
+        # light_mlp/light_mlp_2 input widths from it). 32 was tried twice (exp76,
+        # exp81) and finished 0.09-0.18 dB behind the sph16 twin both times.
         self.sph_dim = 16
         self.dim = 1
         self.gsdim = 4
@@ -3040,10 +3044,19 @@ class GaussianModel:
         selected_pts_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
         half_frame = 0.5 / 30.0
         flat_radius_mask = self.get_temporal_flat_radius().squeeze(-1) >= half_frame
-        # if self.gaussian_dim == 4 and grads_t is not None and grad_t_threshold is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
-        #     padded_grad_t = torch.zeros((n_init_points), device="cuda")
-        #     padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
-        #     selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_t >= grad_t_threshold)
+        # Photometric time-gradient criterion, self-calibrating: select the top 1%
+        # of points by mean |dL/dt| each split event (bounded; the flat-radius /
+        # temporal-range / inside-sphere gates below still apply).  Lets fast
+        # DIFFUSE content (moving leg shadows) trigger temporal splits.
+        if self.gaussian_dim == 4 and grads_t is not None and grads_spec_t is not None and grad_spec_t_threshold is not None:
+            padded_grad_t = torch.zeros((n_init_points), device="cuda")
+            padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
+            pos_t = padded_grad_t[padded_grad_t > 0]
+            if pos_t.numel() > 1000:
+                t_thr = torch.quantile(pos_t, 0.99)
+                t_cand = padded_grad_t >= t_thr
+                selected_pts_mask = torch.logical_or(selected_pts_mask, t_cand)
+                print("time-split t-grad candidates:", int(t_cand.sum()), "thr", float(t_thr))
 
         if self.gaussian_dim == 4 and grads_spec_t is not None and grad_spec_t_threshold is not None:
             padded_grad_spec_t = torch.zeros((n_init_points), device="cuda")
@@ -3560,7 +3573,9 @@ class GaussianModel:
         self.xyz_gradient_accum_abs[update_filter] += torch.norm(viewspace_point_tensor_abs.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1
         if self.gaussian_dim == 4:
-            self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
+            # ABS accumulation: signed t-grads cancel across frames (same pathology
+            # AbsGS fixed for xyz), hiding temporally-misfit diffuse content.
+            self.t_gradient_accum[update_filter] += avg_t_grad[update_filter].abs()
             if add_specular_time_grad and self.rot_4d and self._specular2.numel() > 0:
                 self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
         

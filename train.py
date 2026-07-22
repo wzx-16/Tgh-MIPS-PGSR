@@ -42,6 +42,10 @@ import torch.multiprocessing
 from torchvision import transforms
 import torchvision
 from utils.general_utils import print_tensor_distribution
+import json
+import shutil
+import subprocess
+from omegaconf.listconfig import ListConfig
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -202,8 +206,164 @@ def setup_restored_local_gaussian_model(local_model: GaussianModel, training_arg
         local_model.init_light_env()
     local_model.training_setup(training_args)
 
+def dump_effective_config(args, config_path):
+    """Minimal replacement for the dead prepare_output_and_logger: write the
+    merged effective config (yaml-over-CLI result) + provenance to the model
+    dir.  Call from __main__ AFTER recursive_merge and the save_iterations
+    fixup so the dump reflects what the run actually uses."""
+    os.makedirs(args.model_path, exist_ok=True)
+
+    def _san(v):
+        if isinstance(v, (ListConfig, list, tuple)):
+            return [_san(x) for x in v]
+        if isinstance(v, (bool, int, float, str)) or v is None:
+            return v
+        return str(v)
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    try:
+        git_commit = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                                    text=True, cwd=repo_dir, timeout=10).stdout.strip()
+        git_dirty = bool(subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                                        capture_output=True, text=True, cwd=repo_dir,
+                                        timeout=10).stdout.strip())
+    except Exception:
+        git_commit, git_dirty = "unknown", None
+    payload = {
+        "run_id": int(getattr(args, "id", 0)),
+        "launched": datetime.now().isoformat(timespec="seconds"),
+        "argv": [_san(a) for a in sys.argv],
+        "config_yaml": os.path.abspath(config_path) if config_path else None,
+        "git_commit": git_commit,
+        "git_dirty": git_dirty,
+        "args": {k: _san(v) for k, v in sorted(vars(args).items())},
+    }
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(args.model_path, f"effective_config_{payload['run_id']}_{stamp}.yaml")
+    OmegaConf.save(OmegaConf.create(payload), out_path)
+    if config_path and os.path.isfile(config_path):
+        shutil.copyfile(config_path, os.path.join(args.model_path, f"raw_config_{payload['run_id']}_{stamp}.yaml"))
+    print("Effective config written to", out_path)
+
+
+def evaluate_test_views(iteration, test_dataset, gaussians, local_gaussians, background,
+                        local_feature_start_iter, results_path, run_id, launch_stamp,
+                        compute_ssim=True, checkpoint_saved=False,
+                        best_state=None, best_path=None):
+    """Render every test view at the current iteration; append metrics to a
+    jsonl file; maintain a best-checkpoint pointer.  The forward path mirrors
+    the training loop (velocity warp + flat-top temporal opacity + mt>0.05
+    mask) and render.py's non-TGH branch.  Consumes no RNG, so the training
+    trajectory is bitwise unchanged."""
+    eval_start = time.time()
+    saved_ts_global = gaussians.current_timestamp
+    saved_ts_local = local_gaussians.current_timestamp
+    n_views = len(test_dataset)
+    per_view_psnr, per_view_ssim = [], []
+    with torch.no_grad():
+        gaussians.brdf_mlp.build_mips()  # matches render.py; idempotent, no RNG
+        for view_idx in range(n_views):
+            # CameraDataset returns a 6-tuple; index instead of unpacking so an
+            # arity change cannot silently break eval (the training_report bug).
+            item = test_dataset[view_idx]
+            gt_image, viewpoint_cam = item[0], item[2]
+            viewpoint_cam = viewpoint_cam.cuda()  # deepcopy; original untouched
+            gt = gt_image[0:3].cuda().clamp(0.0, 1.0)
+            timestamp = viewpoint_cam.timestamp
+            gaussians.set_current_timestamp(timestamp)
+            local_gaussians.set_current_timestamp(timestamp)
+            time_range = timestamp - gaussians.get_t
+            xyz = gaussians.get_xyz + gaussians.get_velocity * time_range / gaussians.get_sigma_t_fixed
+            mt = gaussians.get_temporal_opacity_factor(timestamp=timestamp)
+            opacity = gaussians.get_opacity * mt
+            shs = gaussians.get_features
+            ma = (mt > 0.05).squeeze()
+            local_mt = local_gaussians.get_marginal_t(timestamp=timestamp)
+            local_ma = (local_mt > 0.05).squeeze()
+            view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1)
+            d_viewdir_normalized = safe_normalize(view_pos - xyz)
+            normal = gaussians.get_normal(viewpoint_cam.camera_center, xyz)
+            normal = normal + gaussians.get_delta_normal
+            reflvec = safe_normalize(reflect(d_viewdir_normalized, normal))
+            dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
+            dir_pp_normalized = dir_pp / dir_pp.norm(dim=1, keepdim=True)
+            render_pkg = render_3d_pgsr_anti(
+                viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
+                gaussians.get_scaling, gaussians.get_rotation, background,
+                shs=shs, mask=ma, local_mask=local_ma,
+                max_sh_channels=gaussians.max_sh_degree,
+                normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized,
+                pc=gaussians, local_pc=local_gaussians,
+                iteration=iteration, timestamp=timestamp,
+                local_feature_start_iter=local_feature_start_iter)
+            image = render_pkg["render"].clamp(0.0, 1.0)
+            # PSNR convention == calculate_folder_metric.compute_psnr (joint MSE
+            # over pixels+channels).  utils/image_utils.psnr is per-channel and
+            # NOT comparable.
+            mse = torch.mean((image - gt) ** 2)
+            per_view_psnr.append(float(-10.0 * torch.log10(torch.clamp_min(mse, 1.0e-12))))
+            if compute_ssim:
+                per_view_ssim.append(float(ssim(image, gt)))
+            del render_pkg, image, gt, gt_image, xyz, opacity, shs, mt, ma, local_mt, local_ma
+            del view_pos, d_viewdir_normalized, normal, reflvec, dir_pp, dir_pp_normalized
+            del time_range, viewpoint_cam, item
+    gaussians.set_current_timestamp(saved_ts_global)
+    local_gaussians.set_current_timestamp(saved_ts_local)
+    torch.cuda.empty_cache()
+    mean_psnr = float(np.mean(per_view_psnr)) if per_view_psnr else 0.0
+    mean_ssim = float(np.mean(per_view_ssim)) if per_view_ssim else None
+    elapsed = time.time() - eval_start
+    is_best = (best_state is not None and checkpoint_saved
+               and mean_psnr > best_state.get("psnr", -1.0))
+    row = {
+        "iteration": int(iteration),
+        "psnr": round(mean_psnr, 4),
+        "ssim": (round(mean_ssim, 5) if mean_ssim is not None else None),
+        "n_views": n_views,
+        "num_points": int(gaussians.get_xyz.shape[0]),
+        "num_local_points": int(local_gaussians.get_xyz.shape[0]),
+        "elapsed_s": round(elapsed, 2),
+        "checkpoint_saved": bool(checkpoint_saved),
+        "best_so_far": bool(is_best),
+        "launch": launch_stamp,
+        "wall_time": datetime.now().isoformat(timespec="seconds"),
+        "per_view_psnr": [round(v, 4) for v in per_view_psnr],
+    }
+    with open(results_path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    if is_best:
+        best_state["psnr"] = mean_psnr
+        best_state["ssim"] = mean_ssim
+        best_state["iteration"] = int(iteration)
+        best_payload = {
+            "iteration": int(iteration),
+            "psnr": round(mean_psnr, 4),
+            "ssim": (round(mean_ssim, 5) if mean_ssim is not None else None),
+            "run_id": int(run_id),
+            "launch": launch_stamp,
+            "checkpoint": f"gaussian{run_id}_chkpnt{iteration}.pth",
+            "local_checkpoint": f"local{run_id}_chkpnt{iteration}.pth",
+            "aux_dirs": [f"cubemap{run_id}/iteration_{iteration}",
+                         f"light{run_id}/iteration_{iteration}",
+                         f"dir{run_id}/iteration_{iteration}"],
+            "updated": datetime.now().isoformat(timespec="seconds"),
+        }
+        tmp_path = best_path + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(best_payload, f, indent=2)
+        os.replace(tmp_path, best_path)
+    print("\n[ITER {}] TEST eval: PSNR {:.3f}{} ({} views, {:.1f}s){}".format(
+        iteration, mean_psnr,
+        (" SSIM {:.4f}".format(mean_ssim) if mean_ssim is not None else ""),
+        n_views, elapsed, " [new best]" if is_best else ""))
+    return mean_psnr, mean_ssim
+
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint, debug_from,
-             gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id):
+             gaussian_dim, time_duration, num_pts, num_pts_ratio, rot_4d, force_sh_3d, batch_size, id,
+             eval_interval=5000, eval_ssim=True):
     
     # import os, torch, torch.nn as nn
     # print("torch:", torch.__version__, "cuda:", torch.version.cuda, "cudnn:", torch.backends.cudnn.version())
@@ -385,6 +545,64 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     #scene.tgh.create_from_gaussians(gaussians, opt)
     # gaussian_init_flag = False
     training_dataset = scene.getTrainCameras()
+
+    # --- In-training test evaluation state (id-scoped: model_path is shared) ---
+    test_dataset = scene.getTestCameras()
+    eval_launch_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    eval_results_path = os.path.join(scene.model_path, f"test_metrics{id}.jsonl")
+    eval_best_path = os.path.join(scene.model_path, f"best_test{id}.json")
+    eval_best_state = {"psnr": -1.0, "ssim": None, "iteration": -1}
+    # Only honor a previous best when actually resuming; a fresh run that reuses
+    # an id must not compare itself against a stale best from another config.
+    if checkpoint and os.path.exists(eval_best_path):
+        try:
+            with open(eval_best_path) as f:
+                _prev_best = json.load(f)
+            eval_best_state["psnr"] = float(_prev_best.get("psnr", -1.0))
+            eval_best_state["iteration"] = int(_prev_best.get("iteration", -1))
+            print(f"Loaded previous best test PSNR {eval_best_state['psnr']:.3f} @ iter {eval_best_state['iteration']}")
+        except Exception as exc:
+            print("Could not load previous best_test json:", exc)
+    if eval_interval > 0:
+        print(f"In-training test eval: {len(test_dataset)} views every {eval_interval} iters -> {eval_results_path}")
+
+    # --- Per-camera affine color compensation (PGSR-style), train-time only ---
+    cam_affine = None
+    cam_affine_optimizer = None
+    cam_affine_index = {}
+    cam_affine_ids = []
+    if bool(getattr(opt, "cam_affine_enable", False)):
+        cam_affine_ids = sorted({str(cam.shared_camera_id) for cam in training_dataset.viewpoint_stack})
+        cam_affine_index = {cid: i for i, cid in enumerate(cam_affine_ids)}
+        cam_affine = torch.nn.Parameter(torch.zeros(len(cam_affine_ids), 6, device="cuda"))
+        cam_affine_optimizer = torch.optim.Adam([cam_affine], lr=getattr(opt, "cam_affine_lr", 1e-3), eps=1e-15)
+        print(f"Per-camera affine compensation: {len(cam_affine_ids)} cameras, "
+              f"lr {getattr(opt, 'cam_affine_lr', 1e-3)}, from iter {getattr(opt, 'cam_affine_from_iter', 1000)}, "
+              f"ssim gate {getattr(opt, 'cam_affine_ssim_gate', 0.5)}")
+        if checkpoint:
+            ckpt_dir, ckpt_base = os.path.split(checkpoint)
+            if ckpt_base.startswith("gaussian"):
+                affine_ckpt_path = os.path.join(ckpt_dir, "cam_affine" + ckpt_base[len("gaussian"):])
+                if os.path.exists(affine_ckpt_path):
+                    affine_state = torch.load(affine_ckpt_path, map_location="cuda", weights_only=False)
+                    saved_ids = list(affine_state["cam_ids"])
+                    with torch.no_grad():
+                        for row, cid in enumerate(saved_ids):
+                            if cid in cam_affine_index:
+                                cam_affine[cam_affine_index[cid]] = affine_state["weight"][row].to(cam_affine.device)
+                    if saved_ids == cam_affine_ids:
+                        try:
+                            cam_affine_optimizer.load_state_dict(affine_state["optimizer"])
+                        except Exception as exc:
+                            print("[cam_affine] optimizer state restore failed, fresh Adam:", exc)
+                    else:
+                        print("[cam_affine] camera id set changed; optimizer state not restored")
+                    print(f"[cam_affine] restored from {affine_ckpt_path}")
+                else:
+                    print(f"[cam_affine] WARNING: {affine_ckpt_path} not found; identity init at iter {first_iter - 1}")
+            else:
+                print(f"[cam_affine] checkpoint basename {ckpt_base!r} lacks 'gaussian' prefix; identity init")
+
     train_num_workers = getattr(opt, "train_num_workers", -1)
     if train_num_workers < 0:
         train_num_workers = 12 if dataset.dataloader else 0
@@ -704,9 +922,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 profiler.end("debug_io")
                 profiler.begin("loss_fwd")
                 #loss_start = time.time()
-                # Loss
-                Ll1 = l1_loss(image, gt_image)
+                # Loss.  SSIM always sees the RAW render; the per-camera affine
+                # (when enabled + warmup passed + PGSR SSIM gate open) only
+                # compensates the L1 term, so the model cannot hide exposure
+                # error from SSIM and test rendering stays uncompensated.
                 Lssim = 1.0 - ssim(image, gt_image)
+                cam_affine_row = None
+                image_ab = ab = None
+                if (cam_affine is not None
+                        and iteration >= getattr(opt, "cam_affine_from_iter", 1000)
+                        and Lssim.item() < getattr(opt, "cam_affine_ssim_gate", 0.5)):
+                    cam_affine_row = cam_affine_index.get(str(viewpoint_cam.shared_camera_id))
+                if cam_affine_row is not None:
+                    ab = cam_affine[cam_affine_row]
+                    image_ab = torch.exp(ab[:3])[:, None, None] * image + ab[3:6][:, None, None]
+                    Ll1 = l1_loss(image_ab, gt_image)
+                else:
+                    Ll1 = l1_loss(image, gt_image)
                 loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * Lssim
                 # patch_size = 1024#48 * 14
                 # random_v = torch.randint(0, gt_image.shape[-2] - patch_size, (1,))
@@ -902,6 +1134,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
                 loss += 0.01 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
+                # Keep the 32-frame flat-radius cap: exp80 (cap removed, otherwise
+                # identical to exp78) tied overall (28.770 vs 28.823, within run
+                # variance) but lost the fast-shadow crops at f69-71 by 0.15-0.57 dB
+                # — uncapped windows leave more full-clip gaussians that shadows
+                # can't darken per-epoch.
                 high_opa_penalty = torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0)
                 loss += high_opa_penalty.mean()
                 if edge_effect_range is not None:
@@ -1183,6 +1420,29 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #if iteration % 100 == 0:
                     print("\n[ITER {}] Saving Gaussians".format(iteration))
                     scene.save(iteration, opt, tgh, id)
+                    if cam_affine is not None:
+                        torch.save({"cam_ids": cam_affine_ids,
+                                    "weight": cam_affine.detach().cpu(),
+                                    "optimizer": cam_affine_optimizer.state_dict()},
+                                   scene.model_path + f"/cam_affine{id}_chkpnt{iteration}.pth")
+
+                if eval_interval > 0 and (iteration % eval_interval == 0 or iteration == opt.iterations):
+                    # Drop this iteration's forward branches that backward() never
+                    # reached before allocating eval buffers (mirror of the densify
+                    # cleanup below).  Do NOT null viewspace_point_tensor(+abs),
+                    # visibility_filter, radii, batch_t_grad or their local_*
+                    # twins -- the densification-stats block still consumes them.
+                    render_pkg = image = gt_image = feature_map = None
+                    rendered_delta_normal = rendered_local_feature_map = spec_coeff = None
+                    xyz = shs = opacity = opacity_render = mt = ma = local_mt = local_ma = None
+                    view_pos = d_viewdir_normalized = normal = reflvec = dir_pp = dir_pp_normalized = None
+                    image_ab = ab = cam_affine_row = None
+                    evaluate_test_views(
+                        iteration, test_dataset, gaussians, local_gaussians, background,
+                        local_feature_start_iter, eval_results_path, id, eval_launch_stamp,
+                        compute_ssim=eval_ssim,
+                        checkpoint_saved=(iteration in saving_iterations),
+                        best_state=eval_best_state, best_path=eval_best_path)
 
                 if not opacity_zero_reset_done and opacity_zero_reset_iter >= 0 and iteration == opacity_zero_reset_iter:
                     print(f"\n[ITER {iteration}] Resetting global Gaussian opacity to {opacity_zero_reset_value}")
@@ -1238,6 +1498,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         view_pos = d_viewdir_normalized = normal = reflvec = dir_pp = dir_pp_normalized = None
                         render_pkg = image = feature_map = rendered_delta_normal = rendered_local_feature_map = None
                         spec_coeff = render_normal = loss = Ll1 = Lssim = None
+                        image_ab = ab = cam_affine_row = None
                         viewspace_point_tensor = viewspace_point_tensor_abs = None
                         gc.collect()
 
@@ -1261,6 +1522,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         split_time = False
                         if iteration % (2 * densification_interval) == 0 and global_temporal_split_active:
                             split_time = True
+                        # NOTE: past densify_until_iter, non-split_time iterations
+                        # still run spatial clone+split until temporal_split_until_iter.
+                        # Measured (exp72 vs exp74): this alternation is mildly
+                        # BENEFICIAL (+0.07 dB), so it is kept deliberately.
                         if global_densify_active or spec_time_thr is not None:
                             gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr, split_time=split_time)
                         # spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and add_specular_grads) else None
@@ -1316,6 +1581,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         gaussians.optimizer.zero_grad(set_to_none = True)
                         local_gaussians.optimizer.step()
                         local_gaussians.optimizer.zero_grad(set_to_none = True)
+                        if cam_affine_optimizer is not None:
+                            cam_affine_optimizer.step()
+                            cam_affine_optimizer.zero_grad(set_to_none=True)
+                            # Hard mean-centering anchor: the shared exposure
+                            # component stays in the model, so global brightness
+                            # cannot drift away from the uncompensated test cam.
+                            with torch.no_grad():
+                                cam_affine -= cam_affine.mean(dim=0, keepdim=True)
+                            if iteration % 1000 == 0:
+                                print(f"[cam_affine] iter {iteration} "
+                                      f"max|a| {cam_affine[:, :3].abs().max().item():.4f} "
+                                      f"max|b| {cam_affine[:, 3:].abs().max().item():.4f}")
                     # if pipe.env_map_res and iteration < pipe.env_optimize_until:
                     #     env_map_optimizer.step()
                     #     env_map_optimizer.zero_grad(set_to_none = True)
@@ -1506,7 +1783,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=6666)
     parser.add_argument("--exhaust_test", action="store_true")
     parser.add_argument("--id", type=int, default=0)
-    
+    parser.add_argument("--eval_interval", type=int, default=5000,
+                        help="Render all test views and log PSNR/SSIM every N iterations (0 disables). "
+                             "Keep it a multiple of 5000 so every evaluated iteration has a checkpoint.")
+    parser.add_argument("--eval_ssim", type=int, default=1,
+                        help="Also compute SSIM during in-training eval (1/0).")
+
     args = parser.parse_args(sys.argv[1:])
     #args.save_iterations.append(args.iterations)
         
@@ -1530,13 +1812,15 @@ if __name__ == "__main__":
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)
+    dump_effective_config(args, args.config)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.start_checkpoint, args.debug_from,
-             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.id)
+             args.gaussian_dim, args.time_duration, args.num_pts, args.num_pts_ratio, args.rot_4d, args.force_sh_3d, args.batch_size, args.id,
+             eval_interval=args.eval_interval, eval_ssim=bool(args.eval_ssim))
 
     # All done
     print("\nTraining complete.")
