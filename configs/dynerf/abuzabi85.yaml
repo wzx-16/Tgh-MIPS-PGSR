@@ -1,0 +1,122 @@
+# exp85: exp78 recipe + t-grad-ONLY temporal splits (spec threshold 1000000.0 = never selects; plain decimal to avoid YAML string trap; keeps 35k-60k pipeline alive)
+# exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
+# (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
+gaussian_dim: 4
+time_duration: [0.0, 10.0]
+num_pts: 1000_000
+num_pts_ratio: 1.0
+rot_4d: True
+force_sh_3d: True
+batch_size: 1
+exhaust_test: True
+
+ModelParams:
+  sh_degree: 1
+  source_path: "/root/autodl-tmp/projects/Tgh-MIPS-PGSR/data/N3V/abuzabi"
+  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/abuzabi"
+  images: "images"
+  resolution: 1
+  white_background: False
+  data_device: "cuda"
+  eval: True
+  extension: ".jpg"
+  num_extra_pts: 0
+  loaded_pth: ""
+  frame_ratio: 1
+  dataloader: True
+
+PipelineParams:
+  convert_SHs_python: False
+  compute_cov3D_python: False
+  debug: False
+  env_map_res: 0
+  env_optimize_until: 1000000000
+  env_optimize_from: 0
+  eval_shfs_4d: True
+  temporal_opacity_mode: "flat_window"
+  temporal_flat_radius_mult: 1.0
+  sph_residual_keyframes: 0
+  sph_residual_from_iter: 20_000
+  sph_hierarchy_bands: ""
+  # parity-slot dynamic sph keyframes: 8 channels @ 10 keyframes; the two
+  # hat-weighted adjacent keyframe samples (even/odd slots) + blend weights are
+  # fed to light_mlp so the temporal blend is learned instead of lerped
+  sph_parity_bands: ""
+  # sliding-window dynamic sph keyframes (alternative to parity mode): C@K maps
+  # decoded through W slots; each slot holds the tent-weighted (half-width W/2
+  # keyframes) sample of the nearest keyframe with index = slot mod W, so slot
+  # occupants change one at a time; the W weighted samples enter light_mlp as
+  # outer products with the per-gaussian gsdim feature (W*C*gsdim dims, so the
+  # dynamic signal is gated per material) plus the W alphas.  e.g. "1@60" with
+  # 8 slots and gsdim 4 = 32-dim dynamic input + 8 alphas
+  sph_sliding_bands: ""
+  sph_sliding_window: 8
+  sph_time_min: 0.6666666666666666
+  sph_time_max: 2.6333333333333333
+
+OptimizationParams:
+  iterations: 80_000
+  position_lr_init: 0.00016
+  position_t_lr_init: -1.0
+  position_lr_final: 0.0000032
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 80_000
+  brdf_mlp_lr_init : 0.016
+  brdf_mlp_lr_final : 0.00016
+  brdf_mlp_lr_delay_mult : 0.01
+  brdf_mlp_lr_max_steps : 80_000
+  feature_lr: 0.002
+  opacity_lr: 0.05
+  scaling_lr: 0.003
+  rotation_lr: 0.001
+  velocity2_lr_init: 0.001
+  velocity2_lr_final: 0.001
+  velocity2_lr_delay_mult: 1.0
+  velocity2_lr_max_steps: 80_000
+  specular_lr : 0.00005
+  albedo_lr : 0.001
+  delta_normal_lr : 0.001
+  roughness_lr : 0.0002
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  thresh_opa_prune: 0.05
+  densification_interval: 300
+  opacity_reset_interval: 5000
+  densify_from_iter: 500
+  densify_until_iter: 35_000
+  # densify_from_iter2: 15_000
+  # densify_until_iter2: 20_000
+  densify_grad_threshold: 0.0002
+  densify_grad_t_threshold: 0.002
+  temporal_split_from_iter: 30_000
+  temporal_split_until_iter: 60_000
+  densify_specular_time_threshold: 1000000.0
+  opacity_zero_reset_iter: 20000
+  opacity_zero_reset_value: 0.5
+  opacity_periodic_reset_interval: -1
+  opacity_periodic_reset_value: 0.1
+  opacity_periodic_reset_from_iter: 20_000
+  opacity_periodic_reset_until_iter: 40_000
+  temporal_opacity_k_start: 2.0
+  temporal_opacity_k_final: 12.0
+  temporal_opacity_k_ramp_start: 25_000
+  temporal_opacity_k_ramp_end: 40_000
+  temporal_opacity_k_loss_weight: 0.01
+  temporal_flat_radius_start_mult: 0.0
+  temporal_flat_radius_final_mult: 0.75
+  temporal_flat_radius_ramp_start: 25_000
+  temporal_flat_radius_ramp_end: 40_000
+  temporal_flat_radius_loss_weight: 0.05
+  train_num_workers: 4
+  debug_interval: 200
+  local_branch_lazy_init: True
+  densify_until_num_points: -1
+  final_prune_from_iter: -1
+  sh_increase_interval: 15000
+  lambda_opa_mask: 0.0
+  lambda_rigid: 0.0
+  lambda_motion: 0.0
+  cam_affine_enable: True
+  cam_affine_lr: 0.001
+  cam_affine_from_iter: 1000
+  cam_affine_ssim_gate: 0.5

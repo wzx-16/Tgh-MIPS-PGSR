@@ -3392,6 +3392,12 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         if low_opa:
             new_opacities = self.inverse_opacity_activation(1 - (1 - self.opacity_activation(new_opacities)) ** 0.5)
+            # KNOWN NO-OP, kept deliberately: this assigns into an advanced-indexing
+            # temporary, so the parent keeps full opacity while the child gets the
+            # reduced value. Fixing it to `self._opacity.data[mask] = ...` was tested
+            # twice (exp73 bundle -0.05, exp82 single-variable -0.17 vs exp78) and
+            # lost both times — parents staying opaque during pre-9k clones is
+            # load-bearing for early densification dynamics.
             self._opacity[selected_pts_mask].data = new_opacities
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
