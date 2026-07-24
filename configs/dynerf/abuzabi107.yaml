@@ -1,4 +1,4 @@
-# exp104: exp94 base + batch_size 2 for the full 60k (gradient smoothing; ~1.7x wall-clock)
+# exp107: batch 2 + tail batch 4 from 50k (combining the two batch-wave winners)
 # exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
 # (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
 gaussian_dim: 4
@@ -58,6 +58,8 @@ PipelineParams:
 
 OptimizationParams:
   iterations: 60_000
+  batch_size_final: 4
+  batch_size_final_from_iter: 50_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032

@@ -1,10 +1,13 @@
+# exp105: exp94 base + batch_size 4 for the full 60k (max smoothing; ~3x wall-clock)
+# exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
+# (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
 gaussian_dim: 4
 time_duration: [0.0, 10.0]
 num_pts: 1000_000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: True
-batch_size: 1
+batch_size: 4
 exhaust_test: True
 
 ModelParams:
@@ -82,18 +85,16 @@ OptimizationParams:
   densification_interval: 300
   opacity_reset_interval: 5000
   densify_from_iter: 500
-  densify_until_iter: 25_000
+  densify_until_iter: 30_000
   # densify_from_iter2: 15_000
   # densify_until_iter2: 20_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
-  densify_grad_t_quantile: 0.98
-  densify_grad_t_floor: 0.000005
-  temporal_split_from_iter: 25_000
-  temporal_split_until_iter: 45_000
+  temporal_split_from_iter: 30_000
+  temporal_split_until_iter: 50_000
   densify_specular_time_threshold: 0.00001
-  opacity_zero_reset_iter: 9000
-  opacity_zero_reset_value: 0.1
+  opacity_zero_reset_iter: 20000
+  opacity_zero_reset_value: 0.5
   opacity_periodic_reset_interval: -1
   opacity_periodic_reset_value: 0.1
   opacity_periodic_reset_from_iter: 20_000
@@ -108,7 +109,7 @@ OptimizationParams:
   temporal_flat_radius_ramp_start: 25_000
   temporal_flat_radius_ramp_end: 40_000
   temporal_flat_radius_loss_weight: 0.05
-  train_num_workers: 6
+  train_num_workers: 4
   debug_interval: 200
   local_branch_lazy_init: True
   densify_until_num_points: -1

@@ -3587,12 +3587,17 @@ class GaussianModel:
             if add_specular_time_grad and self.rot_4d and self._specular2.numel() > 0:
                 self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
         
-    def add_densification_stats_grad(self, viewspace_point_grad, update_filter, avg_t_grad=None):
+    def add_densification_stats_grad(self, viewspace_point_grad, update_filter, avg_t_grad=None, viewspace_point_grad_abs=None, add_specular_time_grad=False):
         self.xyz_gradient_accum[update_filter] += viewspace_point_grad[update_filter]
+        # abs screen grads (PGSR split criterion); without this, batch>1 training
+        # would never trigger densify_and_split (grads_abs stays zero)
+        if viewspace_point_grad_abs is not None:
+            self.xyz_gradient_accum_abs[update_filter] += viewspace_point_grad_abs[update_filter]
         self.denom[update_filter] += 1
-        if self.gaussian_dim == 4:
+        if self.gaussian_dim == 4 and avg_t_grad is not None:
+            # caller passes abs-accumulated per-view |dL/dt| (exp78 criterion)
             self.t_gradient_accum[update_filter] += avg_t_grad[update_filter]
-            if self.rot_4d and self._specular2.numel() > 0:
+            if add_specular_time_grad and self.rot_4d and self._specular2.numel() > 0:
                 self.specular_time_gradient_accum[update_filter] = torch.max(self.specular_time_gradient_accum[update_filter], self.get_specular2_temporal_variation[update_filter])
 
     def set_current_timestamp(self, current_timestamp : float):

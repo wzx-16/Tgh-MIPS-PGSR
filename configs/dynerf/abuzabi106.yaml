@@ -1,4 +1,4 @@
-# exp104: exp94 base + batch_size 2 for the full 60k (gradient smoothing; ~1.7x wall-clock)
+# exp106: batch 4 @ 30k iterations - full schedule halved vs the 60k base (structure 0-15k, splits 15k-25k; 4x views/iter = 2x total samples of 60k batch-1)
 # exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
 # (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
 gaussian_dim: 4
@@ -7,7 +7,7 @@ num_pts: 1000_000
 num_pts_ratio: 1.0
 rot_4d: True
 force_sh_3d: True
-batch_size: 2
+batch_size: 4
 exhaust_test: True
 
 ModelParams:
@@ -53,20 +53,20 @@ PipelineParams:
   sph_sliding_window: 8
   sph_time_min: 0.6666666666666666
   sph_time_max: 2.6333333333333333
-  fourier_c2f_start_iter: 30_000
+  fourier_c2f_start_iter: 15_000
   fourier_c2f_end_iter: -1
 
 OptimizationParams:
-  iterations: 60_000
+  iterations: 30_000
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032
   position_lr_delay_mult: 0.01
-  position_lr_max_steps: 60_000
+  position_lr_max_steps: 30_000
   brdf_mlp_lr_init : 0.016
   brdf_mlp_lr_final : 0.00016
   brdf_mlp_lr_delay_mult : 0.01
-  brdf_mlp_lr_max_steps : 60_000
+  brdf_mlp_lr_max_steps : 30_000
   feature_lr: 0.002
   opacity_lr: 0.05
   scaling_lr: 0.003
@@ -74,7 +74,7 @@ OptimizationParams:
   velocity2_lr_init: 0.001
   velocity2_lr_final: 0.001
   velocity2_lr_delay_mult: 1.0
-  velocity2_lr_max_steps: 60_000
+  velocity2_lr_max_steps: 30_000
   specular_lr : 0.00005
   albedo_lr : 0.001
   delta_normal_lr : 0.001
@@ -85,15 +85,19 @@ OptimizationParams:
   densification_interval: 300
   opacity_reset_interval: 5000
   densify_from_iter: 500
-  densify_until_iter: 30_000
+  densify_until_iter: 15_000
   # densify_from_iter2: 15_000
   # densify_until_iter2: 20_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
-  temporal_split_from_iter: 30_000
-  temporal_split_until_iter: 50_000
+  temporal_split_from_iter: 15_000
+  temporal_split_until_iter: 25_000
   densify_specular_time_threshold: 0.00001
-  opacity_zero_reset_iter: 20000
+  opacity_zero_reset_iter: 10_000
+  lighting_start_iter: 4500
+  local_feature_start_iter: 6000
+  reset_opacity_high_until_iter: 12_500
+  densify_interval_schedule: "1501:50,7500:100,12500:150,17500:250,22500:250,-1:500"
   opacity_zero_reset_value: 0.5
   opacity_periodic_reset_interval: -1
   opacity_periodic_reset_value: 0.1
@@ -114,7 +118,7 @@ OptimizationParams:
   local_branch_lazy_init: True
   densify_until_num_points: -1
   final_prune_from_iter: -1
-  sh_increase_interval: 15000
+  sh_increase_interval: 7500
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0

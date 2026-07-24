@@ -493,6 +493,7 @@ def render_3d_pgsr_anti(
     iteration = 0,
     timestamp = None,
     local_feature_start_iter = 0,
+    lighting_start_iter = 9000,
     return_mlp_debug = False,
 
 ):
@@ -904,7 +905,7 @@ def render_3d_pgsr_anti(
         #select_mask = torch.logical_or(select_mask, rendered_local_alpha.reshape(-1,) > 0.02)
         select_index = select_mask.nonzero(as_tuple=True)[0]
         #select_index = torch.ones_like(rendered_in.reshape(-1,), dtype=torch.bool)[0]
-    if iteration >= 9000 and len(select_index) > 0:
+    if iteration >= lighting_start_iter and len(select_index) > 0:
         K = np.zeros((3,3))
         K[0][0] = viewpoint_camera.fl_x
         K[0][2] = viewpoint_camera.cx

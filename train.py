@@ -249,7 +249,7 @@ def dump_effective_config(args, config_path):
 def evaluate_test_views(iteration, test_dataset, gaussians, local_gaussians, background,
                         local_feature_start_iter, results_path, run_id, launch_stamp,
                         compute_ssim=True, checkpoint_saved=False,
-                        best_state=None, best_path=None):
+                        best_state=None, best_path=None, lighting_start_iter=9000):
     """Render every test view at the current iteration; append metrics to a
     jsonl file; maintain a best-checkpoint pointer.  The forward path mirrors
     the training loop (velocity warp + flat-top temporal opacity + mt>0.05
@@ -295,7 +295,8 @@ def evaluate_test_views(iteration, test_dataset, gaussians, local_gaussians, bac
                 normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized,
                 pc=gaussians, local_pc=local_gaussians,
                 iteration=iteration, timestamp=timestamp,
-                local_feature_start_iter=local_feature_start_iter)
+                local_feature_start_iter=local_feature_start_iter,
+                lighting_start_iter=lighting_start_iter)
             image = render_pkg["render"].clamp(0.0, 1.0)
             # PSNR convention == calculate_folder_metric.compute_psnr (joint MSE
             # over pixels+channels).  utils/image_utils.psnr is per-channel and
@@ -457,9 +458,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     opacity_periodic_reset_value = getattr(opt, "opacity_periodic_reset_value", 0.1)
     opacity_periodic_reset_from_iter = getattr(opt, "opacity_periodic_reset_from_iter", 20_000)
     opacity_periodic_reset_until_iter = getattr(opt, "opacity_periodic_reset_until_iter", -1)
-    lighting_start_iter = 9000
+    lighting_start_iter = getattr(opt, "lighting_start_iter", 9000)
     albedo_sh_reset_done = False
-    local_feature_start_iter = 12000
+    local_feature_start_iter = getattr(opt, "local_feature_start_iter", 12000)
     local_branch_lazy_init = bool(getattr(opt, "local_branch_lazy_init", False))
     if local_branch_lazy_init:
         print(f"Lazy local branch: empty until iteration {local_feature_start_iter}, then cloned from global model")
@@ -612,6 +613,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if train_num_workers < 0:
         train_num_workers = 12 if dataset.dataloader else 0
     print("Training dataloader workers:", train_num_workers)
+    batch_size_final = getattr(opt, "batch_size_final", -1)
+    batch_size_final_from_iter = getattr(opt, "batch_size_final_from_iter", 50_000)
     training_dataloader = DataLoader(
         training_dataset,
         batch_size=batch_size,
@@ -684,20 +687,56 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             current_iter,
         )
 
+    # densification interval staircase: "until:interval,..." pairs; iteration <
+    # until selects interval; -1 = catch-all. Default reproduces the historical
+    # hardcoded schedule exactly.
+    _sched_spec = getattr(opt, "densify_interval_schedule", "3001:100,15000:200,25000:300,35000:500,45000:500,-1:1000")
+    densify_interval_schedule = []
+    for _part in str(_sched_spec).split(","):
+        _lim, _val = _part.split(":")
+        densify_interval_schedule.append((int(_lim), int(_val)))
+    reset_opacity_high_until_iter = getattr(opt, "reset_opacity_high_until_iter", 25000)
+    # temporal window loss constants (per-scene time model): all frame counts are
+    # converted with temporal_fps; clip t-range clamps anchor gaussian centers.
+    temporal_fps = float(getattr(opt, "temporal_fps", 30.0))
+    temporal_cap_range = float(getattr(opt, "temporal_cap_frames", 32.0)) / temporal_fps
+    temporal_min_effect_range = float(getattr(opt, "temporal_min_effect_frames", 0.5)) / temporal_fps
+    temporal_clip_t_min = float(getattr(opt, "temporal_clip_t_min", 0.6666666666666666))
+    temporal_clip_t_max = float(getattr(opt, "temporal_clip_t_max", 2.6333333333333333))
+    # opacity-loss schedules (previously hardcoded). The global sparsity loss is
+    # additionally bounded by the densify window, as before.
+    global_opacity_loss_from_iter = int(getattr(opt, "global_opacity_loss_from_iter", -1))
+    global_opacity_loss_until_iter = int(getattr(opt, "global_opacity_loss_until_iter", 30_000))
+    global_opacity_loss_weight = float(getattr(opt, "global_opacity_loss_weight", 0.02))
+    local_opacity_loss_from_iter = int(getattr(opt, "local_opacity_loss_from_iter", 15_000))
+    local_opacity_loss_until_iter = int(getattr(opt, "local_opacity_loss_until_iter", -1))
+    local_opacity_loss_weight = float(getattr(opt, "local_opacity_loss_weight", 0.01))
+    density_entropy_loss_from_iter = int(getattr(opt, "density_entropy_loss_from_iter", 3_000))
+    density_entropy_loss_weight = float(getattr(opt, "density_entropy_loss_weight", 0.01))
     while iteration < opt.iterations + 1:
-        if iteration <= 3000:
-            densification_interval = 100
-        elif iteration < 15000:
-            densification_interval = 200
-        elif iteration < 25000:
-            densification_interval = 300
-        elif iteration < 35000:
-            densification_interval = 500
-        elif iteration < 45000:
-            densification_interval = 500
-        else:
-            densification_interval = 1000
+        for _lim, _val in densify_interval_schedule:
+            if _lim < 0 or iteration < _lim:
+                densification_interval = _val
+                break
         for batch_data in training_dataloader:
+            # Scheduled batch-size switch (e.g. batch 4 for the LR tail): rebuild
+            # the loader and restart the epoch loop; the pending iteration is not
+            # consumed, so step counting is unaffected.
+            if batch_size_final > 0 and batch_size != batch_size_final and iteration + 1 >= batch_size_final_from_iter:
+                print(f"\n[ITER {iteration + 1}] Switching batch size {batch_size} -> {batch_size_final}")
+                batch_size = batch_size_final
+                training_dataloader = DataLoader(
+                    training_dataset,
+                    batch_size=batch_size,
+                    shuffle=True,
+                    num_workers=train_num_workers,
+                    collate_fn=lambda x: x,
+                    drop_last=True,
+                    pin_memory=True,
+                    persistent_workers=False,
+                    prefetch_factor=4 if train_num_workers > 0 else None,
+                )
+                break
             #train_start = time.time()
             profiler.mark_body_start()
             iteration += 1
@@ -728,8 +767,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 pipe.debug = True
             
             batch_point_grad = []
+            batch_point_grad_abs = []
             batch_visibility_filter = []
             batch_radii = []
+            # per-view |dL/dt| accumulation (abs of per-view backward deltas):
+            # keeps the exp78 abs-t-grad split criterion intact at batch > 1
+            if batch_size > 1 and gaussians.gaussian_dim == 4:
+                prev_t_grad_sum = torch.zeros(gaussians._t.shape[0], device="cuda")
+                batch_t_grad_abs = torch.zeros(gaussians._t.shape[0], device="cuda")
             batch_local_point_grad = []
             batch_local_visibility_filter = []
             batch_local_radii = []
@@ -881,7 +926,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
                 with profiler.section("render"):
                     render_pkg = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity_render, gaussians.active_sh_degree, 
-                                        gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp, local_feature_start_iter=local_feature_start_iter)
+                                        gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree,normal =normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=iteration, timestamp=viewpoint_cam.timestamp, local_feature_start_iter=local_feature_start_iter, lighting_start_iter=lighting_start_iter)
                 # rendered_spec = render_pkg["rendered_spec"]
                 # rendered_rough = render_pkg["rendered_rough"]
                 # rendered_gb_normal = render_pkg["rendered_gb_normal"]
@@ -1138,16 +1183,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
                 # print(loss, '1')
                 #loss += 0.1 * torch.clip(15-effect_range, min=0).mean()
-                loss += 0.01 * torch.clip(1/30/2 - effect_range, min=0.0).mean()
+                loss += 0.01 * torch.clip(temporal_min_effect_range - effect_range, min=0.0).mean()
                 # Keep the 32-frame flat-radius cap: exp80 (cap removed, otherwise
                 # identical to exp78) tied overall (28.770 vs 28.823, within run
                 # variance) but lost the fast-shadow crops at f69-71 by 0.15-0.57 dB
                 # — uncapped windows leave more full-clip gaussians that shadows
                 # can't darken per-epoch.
-                high_opa_penalty = torch.clip(high_opa_effect_range - 1/30 * 32, min=0.0)
+                high_opa_penalty = torch.clip(high_opa_effect_range - temporal_cap_range, min=0.0)
                 loss += high_opa_penalty.mean()
                 if edge_effect_range is not None:
-                    loss += 0.05 * torch.clip(edge_effect_range - 1/30/2, min=0.0).mean()
+                    loss += 0.05 * torch.clip(edge_effect_range - temporal_min_effect_range, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 6, min=0.0).mean()
                 #loss += 1 * torch.clip(high_opa_effect_range - 1/30 * 2, min=0.0).mean()
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3333333333333335, min = 0.0).mean()
@@ -1155,8 +1200,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #loss += 1 * torch.clip(gaussians.get_t - 2.3666666666666667, min = 0.0).mean()
                 # loss += 1 * torch.clip(gaussians.get_t - 0.0, min = 0.0).mean()
                 # loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
-                loss += 1 * torch.clip(0.6666666666666666 - gaussians.get_t, min = 0.0).mean()
-                loss += 1 * torch.clip(gaussians.get_t - 2.6333333333333333, min = 0.0).mean()
+                loss += 1 * torch.clip(temporal_clip_t_min - gaussians.get_t, min = 0.0).mean()
+                loss += 1 * torch.clip(gaussians.get_t - temporal_clip_t_max, min = 0.0).mean()
                 # Smooth temporal barrier: keep gradients near the time limits.
                 # time_lower, time_upper = 0.6666666666666666, 2.6333333333333333
                 # time_lower, time_upper = 0, 3
@@ -1277,20 +1322,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # gs_in[outside_mask] = 0.0
                         # time_space_in_mask = torch.logical_and(gs_in > 0.5, ma)
                         #loss += 0.01 * gaussians.get_opacity[ma].mean()
-                        if iteration < 30000:
-                            loss += 0.02 * gaussians.get_opacity[visibility_filter].mean()
+                        if (global_opacity_loss_from_iter < 0 or iteration >= global_opacity_loss_from_iter) and iteration < global_opacity_loss_until_iter:
+                            loss += global_opacity_loss_weight * gaussians.get_opacity[visibility_filter].mean()
                         # elif iteration < 40000:
                         #     loss += 0.01 * gaussians.get_opacity[visibility_filter].mean()
-                    if iteration > 15000:
-                        # pass
+                    if iteration > local_opacity_loss_from_iter and (local_opacity_loss_until_iter < 0 or iteration < local_opacity_loss_until_iter):
+                        # module 4: suppress dynamic local gaussians via opacity
                         local_opa = local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()
-                        loss += 0.01 * safe_mean(local_opa)
+                        loss += local_opacity_loss_weight * safe_mean(local_opa)
                         #loss += 0.001 * gaussians.get_opacity.mean()
                     density_loss = entropy_loss(opacity[visibility_filter])
                     # density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
-                    if iteration > 3000:
-                        #pass
-                        loss += density_loss * 0.01
+                    if iteration > density_entropy_loss_from_iter:
+                        loss += density_loss * density_entropy_loss_weight
                         #loss += -gaussians._velocity2[visibility_filter].mean() * 0.02
                     if pipe.temporal_opacity_mode != "flat_window":
                         target_k = get_temporal_opacity_target_k(iteration)
@@ -1303,6 +1347,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 with profiler.section("backward"):
                     loss.backward()
                 batch_point_grad.append(torch.norm(viewspace_point_tensor.grad[:,:2], dim=-1))
+                if viewspace_point_tensor_abs.grad is not None:
+                    batch_point_grad_abs.append(torch.norm(viewspace_point_tensor_abs.grad[:,:2], dim=-1))
+                else:
+                    batch_point_grad_abs.append(torch.zeros_like(batch_point_grad[-1]))
+                if batch_size > 1 and gaussians.gaussian_dim == 4:
+                    cur_t_grad = gaussians._t.grad[:, 0].detach().clone() if gaussians._t.grad is not None else torch.zeros(gaussians._t.shape[0], device="cuda")
+                    batch_t_grad_abs += (cur_t_grad - prev_t_grad_sum).abs()
+                    prev_t_grad_sum = cur_t_grad
                 batch_radii.append(radii)
                 batch_visibility_filter.append(visibility_filter)
                 local_point_grad = torch.zeros((local_viewspace_point_tensor.shape[0],), device=local_viewspace_point_tensor.device)
@@ -1325,6 +1377,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_viewspace_point_grad[visibility_filter] = batch_viewspace_point_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                 batch_viewspace_point_grad = batch_viewspace_point_grad.unsqueeze(1)
 
+                batch_viewspace_point_grad_abs = torch.stack(batch_point_grad_abs,1).sum(1)
+                batch_viewspace_point_grad_abs[visibility_filter] = batch_viewspace_point_grad_abs[visibility_filter] * batch_size / visibility_count[visibility_filter]
+                batch_viewspace_point_grad_abs = batch_viewspace_point_grad_abs.unsqueeze(1)
+
                 local_visibility_count = torch.stack(batch_local_visibility_filter, 1).sum(1)
                 local_visibility_filter = local_visibility_count > 0
                 local_radii = torch.stack(batch_local_radii, 1).max(1)[0]
@@ -1334,10 +1390,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 batch_local_viewspace_point_grad = batch_local_viewspace_point_grad.unsqueeze(1)
                 
                 if gaussians.gaussian_dim == 4:
-                    if gaussians._t.grad is not None:
-                        batch_t_grad = gaussians._t.grad.clone()[:,0].detach()
-                    else:
-                        batch_t_grad = torch.zeros_like(gaussians._t[:, 0].detach())
+                    # abs-of-per-view t-grads (exp78 criterion), same visibility
+                    # normalization as the signed path
+                    batch_t_grad = batch_t_grad_abs.clone()
                     batch_t_grad[visibility_filter] = batch_t_grad[visibility_filter] * batch_size / visibility_count[visibility_filter]
                     batch_t_grad = batch_t_grad.unsqueeze(1)
                 else:
@@ -1447,6 +1502,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         local_feature_start_iter, eval_results_path, id, eval_launch_stamp,
                         compute_ssim=eval_ssim,
                         checkpoint_saved=(iteration in saving_iterations),
+                        lighting_start_iter=lighting_start_iter,
                         best_state=eval_best_state, best_path=eval_best_path)
 
                 if not opacity_zero_reset_done and opacity_zero_reset_iter >= 0 and iteration == opacity_zero_reset_iter:
@@ -1481,16 +1537,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if global_densify_active or global_temporal_split_active:
                     # Keep track of max radii in image-space for pruning
                     gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                    if global_temporal_split_active and (iteration % (2*densification_interval)) > (3 * (densification_interval // 2)):
+                        add_specular_grads = True
+                    else:
+                        add_specular_grads = False
                     if batch_size == 1:
-                        # if iteration >= 8000 and (iteration % densification_interval) > (densification_interval // 2) and not (iteration > opt.densify_until_iter and iteration < opt.densify_from_iter2):
-                        if global_temporal_split_active and (iteration % (2*densification_interval)) > (3 * (densification_interval // 2)):
-                            add_specular_grads = True
-                        else:
-                            add_specular_grads = False
-                            
                         gaussians.add_densification_stats_pgsr(viewspace_point_tensor, viewspace_point_tensor_abs, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None, add_specular_grads)
                     else:
-                        gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None)
+                        gaussians.add_densification_stats_grad(batch_viewspace_point_grad, visibility_filter, batch_t_grad if gaussians.gaussian_dim == 4 else None, viewspace_point_grad_abs=batch_viewspace_point_grad_abs, add_specular_time_grad=add_specular_grads)
 
                     if iteration > opt.densify_from_iter and iteration % (densification_interval // 2) == 0:
                         # The optimizer surgery below retires parameter tensors, but graph
@@ -1543,7 +1597,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # print("reset opacity")
                         # if iteration == opt.opacity_reset_interval:
                         #gaussians.reset_opacity()
-                        if iteration < 25000:
+                        if iteration < reset_opacity_high_until_iter:
                             gaussians.reset_opacity_high()
                         #gaussians.reset_specular_high()
                         # gaussians.reset_feature()

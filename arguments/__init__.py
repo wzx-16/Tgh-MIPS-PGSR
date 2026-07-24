@@ -146,6 +146,38 @@ class OptimizationParams(ParamGroup):
         # (0 = pure quantile, the exp78 behavior; measured signal scale in
         # abuzabi is ~5.5-6.3e-5, so ~1e-5 is a gentle floor)
         self.densify_grad_t_floor = 0.0
+        # scheduled batch-size switch: at batch_size_final_from_iter the training
+        # loader is rebuilt with batch_size_final views per step (-1 = disabled).
+        # Gradient-noise reduction for the LR tail; iteration count is unchanged.
+        self.batch_size_final = -1
+        self.batch_size_final_from_iter = 50_000
+        # phase-start iterations (previously hardcoded), exposed so schedules can
+        # be rescaled e.g. for larger batch sizes. Defaults = historical values.
+        self.lighting_start_iter = 9000
+        self.local_feature_start_iter = 12000
+        self.reset_opacity_high_until_iter = 25_000
+        # densification interval staircase: "until:interval,..." (iteration <
+        # until; -1 = catch-all). Default = historical hardcoded schedule.
+        self.densify_interval_schedule = "3001:100,15000:200,25000:300,35000:500,45000:500,-1:1000"
+        # scene time model (previously hardcoded for 60 frames @30fps):
+        # frame-count-based window losses use temporal_fps; the clip t-range
+        # clamps anchor temporal centers inside [t_min, t_max].
+        self.temporal_fps = 30.0
+        self.temporal_cap_frames = 32.0
+        self.temporal_min_effect_frames = 0.5
+        self.temporal_clip_t_min = 0.6666666666666666
+        self.temporal_clip_t_max = 2.6333333333333333
+        # opacity-loss schedules (previously hardcoded; defaults = historical).
+        # Global sparsity loss also requires densify_from < iter <= densify_until
+        # (unchanged); from_iter -1 = no extra lower bound, until -1 = no end.
+        self.global_opacity_loss_from_iter = -1
+        self.global_opacity_loss_until_iter = 30_000
+        self.global_opacity_loss_weight = 0.02
+        self.local_opacity_loss_from_iter = 15_000
+        self.local_opacity_loss_until_iter = -1
+        self.local_opacity_loss_weight = 0.01
+        self.density_entropy_loss_from_iter = 3_000
+        self.density_entropy_loss_weight = 0.01
         self.densify_specular_time_threshold = 0.0000003
         self.temporal_split_from_iter = 25_000
         self.temporal_split_until_iter = 35_000

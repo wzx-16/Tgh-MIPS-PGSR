@@ -1,4 +1,4 @@
-# exp104: exp94 base + batch_size 2 for the full 60k (gradient smoothing; ~1.7x wall-clock)
+# exp108: EXACT exp104 reproduction (record verification: batch 2 full 60k on exp94 base)
 # exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
 # (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
 gaussian_dim: 4
