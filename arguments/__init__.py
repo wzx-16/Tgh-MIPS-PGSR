@@ -87,6 +87,11 @@ class PipelineParams(ParamGroup):
         self.sph_sliding_window = 16
         self.sph_time_min = -1.0
         self.sph_time_max = -1.0
+        # Coarse-to-fine temporal Fourier features (specular2 coeffs): bands
+        # open low-frequency-first between start and end iter (BARF-style
+        # smooth window). end <= start (default) = original hard gate at start.
+        self.fourier_c2f_start_iter = 30_000
+        self.fourier_c2f_end_iter = -1
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -132,6 +137,15 @@ class OptimizationParams(ParamGroup):
         # self.densify_until_iter2 = 25_000
         self.densify_grad_threshold = 0.0002
         self.densify_grad_t_threshold = 0.002
+        # temporal split t-grad selection: top (1 - quantile) fraction of points
+        # by accumulated |dL/dt| are split each event (0.99 = top 1%, the exp78
+        # record setting; lower = more temporal splits, higher = fewer)
+        self.densify_grad_t_quantile = 0.99
+        # absolute floor on the quantile-derived |dL/dt| threshold: once the
+        # population converges below the floor, no more temporal splits happen
+        # (0 = pure quantile, the exp78 behavior; measured signal scale in
+        # abuzabi is ~5.5-6.3e-5, so ~1e-5 is a gentle floor)
+        self.densify_grad_t_floor = 0.0
         self.densify_specular_time_threshold = 0.0000003
         self.temporal_split_from_iter = 25_000
         self.temporal_split_until_iter = 35_000

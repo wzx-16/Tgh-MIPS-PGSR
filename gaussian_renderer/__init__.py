@@ -15,6 +15,16 @@ import math
 #from diff_gaussian_rasterization_4d_abs import GaussianRasterizationSettings, GaussianRasterizer
 from diff_plane_rasterization_anti import GaussianRasterizationSettings as PlaneGaussianRasterizationSettings
 from diff_plane_rasterization_anti import GaussianRasterizer as PlaneGaussianRasterizer
+# Accelerated PGSR rasterizer (Taming-3DGS-style warp-per-bucket backward +
+# StopThePop tile culling, ported from sharptimegsfast). Same API/outputs;
+# measured 2.2x fwd+bwd on abuzabi (38->17 ms), grads match to 1e-5 modulo
+# the <1/255-alpha tile culling. Used by render_3d_pgsr_anti when installed.
+try:
+    from diff_plane_rasterization_anti_fast import GaussianRasterizationSettings as PlaneGaussianRasterizationSettingsFast
+    from diff_plane_rasterization_anti_fast import GaussianRasterizer as PlaneGaussianRasterizerFast
+    HAS_FAST_PLANE_RASTER = True
+except ImportError:
+    HAS_FAST_PLANE_RASTER = False
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh, eval_shfs_4d
 from utils.transformation_util import matrix_to_quaternion, quaternion_to_matrix
@@ -520,7 +530,9 @@ def render_3d_pgsr_anti(
     # full_proj_transform = (world_view_transform.unsqueeze(0).bmm(projection_matrix.unsqueeze(0))).squeeze(0)
     # camera_center = torch.linalg.inv(extr)[:3, 3]
     #print(viewpoint_camera.extr, "test")
-    raster_settings = PlaneGaussianRasterizationSettings(
+    settings_cls = PlaneGaussianRasterizationSettingsFast if HAS_FAST_PLANE_RASTER else PlaneGaussianRasterizationSettings
+    rasterizer_cls = PlaneGaussianRasterizerFast if HAS_FAST_PLANE_RASTER else PlaneGaussianRasterizer
+    raster_settings = settings_cls(
             image_height=int(viewpoint_camera.image_height),
             image_width=int(viewpoint_camera.image_width),
             tanfovx=tanfovx,
@@ -539,7 +551,7 @@ def render_3d_pgsr_anti(
             debug=False
         )
     #print(viewpoint_camera.extr, "1")
-    rasterizer = PlaneGaussianRasterizer(raster_settings = raster_settings)
+    rasterizer = rasterizer_cls(raster_settings = raster_settings)
 
     # If precomputed colors are provided, use them. Otherwise, if it is desired to precompute colors
     # from SHs in Python, do it. If not, then SH -> RGB conversion will be done by rasterizer.
@@ -686,7 +698,18 @@ def render_3d_pgsr_anti(
     # delta_feature = pc.light_mlp_2(light_mlp2_input)
     # feature = torch.tanh(feature + delta_feature)
     feature_coeff = specular2[:, pc.gsdim :] * 2
-    if iteration >= 30000:
+    c2f_start = getattr(pc, "fourier_c2f_start_iter", 30000)
+    c2f_end = getattr(pc, "fourier_c2f_end_iter", -1)
+    if iteration >= c2f_start:
+        if c2f_end > c2f_start and iteration < c2f_end:
+            # Coarse-to-fine: open the 5 frequency bands low-first with a
+            # BARF-style smooth window. alpha runs 0->5 across the anneal
+            # range; band k fades in while alpha is in [k, k+1].
+            alpha = 5.0 * (iteration - c2f_start) / (c2f_end - c2f_start)
+            k = torch.arange(5, dtype=torch.float32, device='cuda')
+            band_w = torch.clamp(alpha - k, 0.0, 1.0)
+            band_w = 0.5 * (1.0 - torch.cos(math.pi * band_w))
+            fourier_feature = fourier_feature * band_w.repeat(2)
         feature = feature + (feature_coeff.reshape(-1, pc.gsdim, 10) @ fourier_feature).squeeze()
     if iteration >= 20000:
         pass

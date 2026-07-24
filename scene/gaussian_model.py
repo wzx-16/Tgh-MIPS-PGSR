@@ -3025,7 +3025,7 @@ class GaussianModel:
         #print("mask", (torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2).size())
         return torch.sum((xyz - ENV_CENTER[None])**2, dim=-1) > ENV_RADIUS**2
 
-    def densify_and_split_time(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=2, defer_prune=False, parent_exclusion_mask=None):
+    def densify_and_split_time(self, grads_t, grads_spec_t, grad_t_threshold, grad_spec_t_threshold, N=2, defer_prune=False, parent_exclusion_mask=None, grad_t_quantile=0.99, grad_t_floor=0.0):
         if grad_spec_t_threshold is None:
             return
         n_init_points = self.get_xyz.shape[0]
@@ -3053,7 +3053,9 @@ class GaussianModel:
             padded_grad_t[:grads_t.shape[0]] = grads_t.squeeze()
             pos_t = padded_grad_t[padded_grad_t > 0]
             if pos_t.numel() > 1000:
-                t_thr = torch.quantile(pos_t, 0.99)
+                # quantile self-calibrates the working point; the floor stops
+                # splits once the population's |dL/dt| tail converges below it
+                t_thr = torch.clamp_min(torch.quantile(pos_t, grad_t_quantile), grad_t_floor)
                 t_cand = padded_grad_t >= t_thr
                 selected_pts_mask = torch.logical_or(selected_pts_mask, t_cand)
                 print("time-split t-grad candidates:", int(t_cand.sum()), "thr", float(t_thr))
@@ -3436,7 +3438,7 @@ class GaussianModel:
 
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False, grad_t_quantile=0.99, grad_t_floor=0.0):
         # Every per-gaussian parameter gets replaced by a new nn.Parameter below
         # (grad=None), so the optimizer step that follows can never consume the
         # old .grad buffers; dropping them first removes a params-worth of
@@ -3507,7 +3509,7 @@ class GaussianModel:
                 spatial_prune_filter = self.densify_and_split(grads_abs, max_grad * 2, extent, grads_t, max_grad_t, gs_in, outside_mask, defer_prune=True)
             #self.densify_and_split_time3(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad)
             else:
-                temporal_prune_filter = self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad, defer_prune=True)
+                temporal_prune_filter = self.densify_and_split_time(grads_t, grads_spec_t, max_grad_t, max_specular_time_grad, defer_prune=True, grad_t_quantile=grad_t_quantile, grad_t_floor=grad_t_floor)
             deferred_prune_filter = merge_prune_filters(spatial_prune_filter, temporal_prune_filter)
 
         #prune_mask = (self.get_opacity < min_opacity).squeeze()

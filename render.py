@@ -379,6 +379,8 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         local_gaussians.temporal_opacity_mode = pipeline.temporal_opacity_mode
         local_gaussians.temporal_flat_radius_mult = pipeline.temporal_flat_radius_mult
         local_gaussians.temporal_flat_edge_sigma_mult = pipeline.temporal_flat_edge_sigma_mult
+        gaussians.fourier_c2f_start_iter = getattr(pipeline, "fourier_c2f_start_iter", 30_000)
+        gaussians.fourier_c2f_end_iter = getattr(pipeline, "fourier_c2f_end_iter", -1)
         print("Temporal opacity mode:", pipeline.temporal_opacity_mode)
         print("Temporal flat legacy args:", pipeline.temporal_flat_radius_mult, pipeline.temporal_flat_edge_sigma_mult)
         scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, shuffle=False, render_only=True, eid=id)

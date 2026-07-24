@@ -403,6 +403,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.sph_parity_bands = getattr(pipe, "sph_parity_bands", "")
     gaussians.sph_sliding_bands = getattr(pipe, "sph_sliding_bands", "")
     gaussians.sph_sliding_window = getattr(pipe, "sph_sliding_window", 16)
+    gaussians.fourier_c2f_start_iter = getattr(pipe, "fourier_c2f_start_iter", 30_000)
+    gaussians.fourier_c2f_end_iter = getattr(pipe, "fourier_c2f_end_iter", -1)
+    if gaussians.fourier_c2f_end_iter > gaussians.fourier_c2f_start_iter:
+        print(f"Coarse-to-fine Fourier features: bands anneal over "
+              f"[{gaussians.fourier_c2f_start_iter}, {gaussians.fourier_c2f_end_iter}]")
     if getattr(pipe, "sph_time_min", -1.0) >= 0:
         gaussians.sph_time_min = pipe.sph_time_min
     if getattr(pipe, "sph_time_max", -1.0) >= 0:
@@ -682,16 +687,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     while iteration < opt.iterations + 1:
         if iteration <= 3000:
             densification_interval = 100
-        elif iteration < 6000:
-            densification_interval = 200
         elif iteration < 15000:
+            densification_interval = 200
+        elif iteration < 25000:
             densification_interval = 300
-        elif iteration < 30000:
+        elif iteration < 35000:
             densification_interval = 500
-        elif iteration < 40000:
-            densification_interval = 1000
+        elif iteration < 45000:
+            densification_interval = 500
         else:
-            densification_interval = 2000
+            densification_interval = 1000
         for batch_data in training_dataloader:
             #train_start = time.time()
             profiler.mark_body_start()
@@ -1527,7 +1532,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # Measured (exp72 vs exp74): this alternation is mildly
                         # BENEFICIAL (+0.07 dB), so it is kept deliberately.
                         if global_densify_active or spec_time_thr is not None:
-                            gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr, split_time=split_time)
+                            gaussians.densify_and_prune(opt.densify_grad_threshold, opt.thresh_opa_prune, scene.cameras_extent, size_threshold, iteration, opt.densify_grad_t_threshold, spec_time_thr, split_time=split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor)
                         # spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and add_specular_grads) else None
                         # gaussians.densify_and_prune_time(opt.thresh_opa_prune, scene.cameras_extent, None, opt.densify_grad_t_threshold, spec_time_thr)   
                     #if iteration > opt.densify_from_iter and iteration % (opt.densification_interval * 2) == 0:
