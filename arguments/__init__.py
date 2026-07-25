@@ -151,6 +151,9 @@ class OptimizationParams(ParamGroup):
         # Gradient-noise reduction for the LR tail; iteration count is unchanged.
         self.batch_size_final = -1
         self.batch_size_final_from_iter = 50_000
+        # generalized: "iter:bs,iter:bs,..." switches AT iter (supports down-
+        # switching); empty = use batch_size_final; overrides it when set.
+        self.batch_size_schedule = ""
         # phase-start iterations (previously hardcoded), exposed so schedules can
         # be rescaled e.g. for larger batch sizes. Defaults = historical values.
         self.lighting_start_iter = 9000

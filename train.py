@@ -615,6 +615,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print("Training dataloader workers:", train_num_workers)
     batch_size_final = getattr(opt, "batch_size_final", -1)
     batch_size_final_from_iter = getattr(opt, "batch_size_final_from_iter", 50_000)
+    # generalized batch schedule "iter:bs,iter:bs,..." (switch AT iter, ascending
+    # iters; supports down-switching). Takes precedence over batch_size_final.
+    _bs_sched_spec = str(getattr(opt, "batch_size_schedule", "") or "")
+    batch_size_schedule = []
+    if _bs_sched_spec.strip():
+        for _part in _bs_sched_spec.split(","):
+            _it, _bs = _part.split(":")
+            batch_size_schedule.append((int(_it), int(_bs)))
+        batch_size_schedule.sort()
+    elif batch_size_final > 0:
+        batch_size_schedule = [(batch_size_final_from_iter, batch_size_final)]
+    _bs_next_idx = 0
     training_dataloader = DataLoader(
         training_dataset,
         batch_size=batch_size,
@@ -722,9 +734,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # Scheduled batch-size switch (e.g. batch 4 for the LR tail): rebuild
             # the loader and restart the epoch loop; the pending iteration is not
             # consumed, so step counting is unaffected.
-            if batch_size_final > 0 and batch_size != batch_size_final and iteration + 1 >= batch_size_final_from_iter:
-                print(f"\n[ITER {iteration + 1}] Switching batch size {batch_size} -> {batch_size_final}")
-                batch_size = batch_size_final
+            _bs_target = batch_size
+            while _bs_next_idx < len(batch_size_schedule) and iteration + 1 >= batch_size_schedule[_bs_next_idx][0]:
+                _bs_target = batch_size_schedule[_bs_next_idx][1]
+                _bs_next_idx += 1
+            if _bs_target != batch_size:
+                print(f"\n[ITER {iteration + 1}] Switching batch size {batch_size} -> {_bs_target}")
+                batch_size = _bs_target
                 training_dataloader = DataLoader(
                     training_dataset,
                     batch_size=batch_size,
