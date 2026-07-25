@@ -44,33 +44,33 @@ if __name__ == '__main__':
     # extract images
     #videos = [os.path.join(args.path, vname) for vname in os.listdir(args.path) if vname.endswith(".mp4")]
 
-    images_path = os.path.join(args.path, "images/")
-    #os.makedirs(images_path, exist_ok=True)
+    # images_path = os.path.join(args.path, "images/")
+    # #os.makedirs(images_path, exist_ok=True)
     
-    # for video in videos:
-    #     cam_name = video.split('/')[-1].split('.')[-2]
-    #     do_system(f"ffmpeg -i {video} -start_number 0 {images_path}/{cam_name}_%04d.png")
+    # # for video in videos:
+    # #     cam_name = video.split('/')[-1].split('.')[-2]
+    # #     do_system(f"ffmpeg -i {video} -start_number 0 {images_path}/{cam_name}_%04d.png")
         
-    # load data
-    base_images_path = os.path.join(args.path, "/")
+    # # load data
+    # base_images_path = os.path.join(args.path, "/")
 
-    # Load images from camera-specific subfolders
-    images = []
-    cams = []
-    for cam_folder in sorted(glob.glob(os.path.join(base_images_path, "*"))):
-        if os.path.isdir(cam_folder):
-            cam_id = os.path.basename(cam_folder)
-            cam_images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(cam_folder, "*"))) 
-                         if f.lower().endswith(('png', 'jpg', 'jpeg')) and int(f[-10:-4]) < 100]
-            images.extend(cam_images)
-            cams.append(cam_id)
-    cams = sorted(set(cams))
-    print(f"Images: {images}")
-    print(f"Cameras: {cams}")
-    # images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(args.path, "images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
+    # # Load images from camera-specific subfolders
+    # images = []
+    # cams = []
+    # for cam_folder in sorted(glob.glob(os.path.join(base_images_path, "*"))):
+    #     if os.path.isdir(cam_folder):
+    #         cam_id = os.path.basename(cam_folder)
+    #         cam_images = [f[len(args.path):] for f in sorted(glob.glob(os.path.join(cam_folder, "*"))) 
+    #                      if f.lower().endswith(('png', 'jpg', 'jpeg')) and int(f[-10:-4]) < 100]
+    #         images.extend(cam_images)
+    #         cams.append(cam_id)
+    # cams = sorted(set(cams))
+    # print(f"Images: {images}")
+    # print(f"Cameras: {cams}")
+    images = [f[(len(args.path) + 9):] for f in sorted(glob.glob(os.path.join(args.path, "original/images/", "*"))) if f.lower().endswith('png') or f.lower().endswith('jpg') or f.lower().endswith('jpeg')]
     # images = [im for im in images if int(im[11:17]) < 200]
-    # cams = sorted(set([im[7:10] for im in images]))
-    # print(images)
+    # cams = sorted(set([im[19:23] for im in images]))
+    print(images)
     # print(cams)
     # exit()
     
@@ -81,31 +81,33 @@ if __name__ == '__main__':
         calib = json.load(f)
     #poses_bounds = np.load(os.path.join(args.path, 'poses_bounds.npy'))
     #N = poses_bounds.shape[0]
-    cameras = calib["cameras"]
-    camera_poses = calib["camera_poses"]
+    cameras = calib
+    camera_poses = calib
+
     N = len(cameras.keys())
     poses = []
     Ks = []
     #mapxy = []
     cam_names = []
+    print(cameras.keys())
     for k in cameras.keys():
         # if int(k) > 53:
         #     continue
         cam_names.append(k)
         RT = np.eye(4)
-        RT[:3, :3] = np.array(camera_poses[k]['R'])
+        RT[:3, :3] = np.array(camera_poses[k]['R']).reshape(3, 3)
         RT[:3, 3] = np.array(camera_poses[k]['T']).reshape(3)
         RT = np.linalg.inv(RT)  # convert to world to camera
-        W, H = cameras[k]['image_size'][0], cameras[k]['image_size'][1]
+        W, H = cameras[k]['imgSize'][0], cameras[k]['imgSize'][1]
         W = W
         H = H
         poses.append(RT)
-        K = np.array(cameras[k]['K'])
+        K = np.array(cameras[k]['K']).reshape(3, 3)
         # K[0][0] /= 2
         # K[0][2] /= 2
         # K[1][1] /= 2
         # K[1][2] /= 2
-        D = np.array(cameras[k]['dist'])
+        D = np.array(cameras[k]['distCoeff']).reshape(-1)
         
         new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(K, D, (W, H), 1, (W, H))
         mapx, mapy = cv2.initUndistortRectifyMap(K, D, None, new_camera_matrix, (W, H), cv2.CV_32FC1)
@@ -119,8 +121,8 @@ if __name__ == '__main__':
         #         cv2.imwrite(imagename, undis_img)
 
         for imagename in images:
-            if imagename[8:12] == k:
-                undis_img = cv2.imread(os.path.join(args.path, imagename), cv2.IMREAD_UNCHANGED)
+            if imagename[10:14] == k:
+                undis_img = cv2.imread(os.path.join(args.path, os.path.join("original/", imagename)), cv2.IMREAD_UNCHANGED)
                 undis_img = cv2.remap(undis_img, mapx, mapy, cv2.INTER_LINEAR)
                 #print(undis_img.shape)
                 #undis_img = undis_img[200:3800, 100:2900]

@@ -1,0 +1,145 @@
+# abuzabi_2: second processed dataset (100 frames, t 0.0-3.3, 30fps, 58 cams, test cam0026) @ 70k iters;
+# = the exp111 champion recipe (batch 1 -> 2 in split window -> 4 tail, reset 0.5,
+# static sph16, abs-t-grad splits, affine) with all schedules scaled x7/6 and the
+# scene time model generalized (clip half-range static init, 52-frame cap).
+# exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
+# (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
+gaussian_dim: 4
+time_duration: [0.0, 2.0]   # bounds pcd init to the 61 real frames (0-60)
+num_pts: 1000_000
+num_pts_ratio: 1.0
+rot_4d: True
+force_sh_3d: True
+batch_size: 1
+exhaust_test: True
+
+ModelParams:
+  sh_degree: 1
+  source_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/data/abuzabi_2"
+  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/abuzabi_2"
+  images: "images"
+  resolution: 1
+  white_background: False
+  data_device: "cuda"
+  eval: True
+  extension: ".jpg"
+  num_extra_pts: 0
+  loaded_pth: ""
+  frame_ratio: 1
+  dataloader: True
+
+PipelineParams:
+  convert_SHs_python: False
+  compute_cov3D_python: False
+  debug: False
+  env_map_res: 0
+  env_optimize_until: 1000000000
+  env_optimize_from: 0
+  eval_shfs_4d: True
+  temporal_opacity_mode: "flat_window"
+  temporal_flat_radius_mult: 1.0
+  sph_residual_keyframes: 0
+  sph_residual_from_iter: 20_000
+  sph_hierarchy_bands: ""
+  # parity-slot dynamic sph keyframes: 8 channels @ 10 keyframes; the two
+  # hat-weighted adjacent keyframe samples (even/odd slots) + blend weights are
+  # fed to light_mlp so the temporal blend is learned instead of lerped
+  sph_parity_bands: ""
+  # sliding-window dynamic sph keyframes (alternative to parity mode): C@K maps
+  # decoded through W slots; each slot holds the tent-weighted (half-width W/2
+  # keyframes) sample of the nearest keyframe with index = slot mod W, so slot
+  # occupants change one at a time; the W weighted samples enter light_mlp as
+  # outer products with the per-gaussian gsdim feature (W*C*gsdim dims, so the
+  # dynamic signal is gated per material) plus the W alphas.  e.g. "1@60" with
+  # 8 slots and gsdim 4 = 32-dim dynamic input + 8 alphas
+  sph_sliding_bands: ""
+  sph_sliding_window: 8
+  sph_time_min: 0.0
+  sph_time_max: 2.0
+  fourier_c2f_start_iter: 30_000
+  fourier_c2f_end_iter: -1
+
+OptimizationParams:
+  iterations: 60_000
+  batch_size_schedule: "55000:2"
+  position_lr_init: 0.00016
+  position_t_lr_init: -1.0
+  position_lr_final: 0.0000032
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 60_000
+  brdf_mlp_lr_init : 0.016
+  brdf_mlp_lr_final : 0.00016
+  brdf_mlp_lr_delay_mult : 0.01
+  brdf_mlp_lr_max_steps : 60_000
+  feature_lr: 0.002
+  opacity_lr: 0.05
+  scaling_lr: 0.003
+  rotation_lr: 0.001
+  rotation_lr_final: 0.0001
+  rotation_lr_max_steps: 60_000
+  velocity2_lr_init: 0.001
+  velocity2_lr_final: 0.001
+  velocity2_lr_delay_mult: 1.0
+  velocity2_lr_max_steps: 60_000
+  specular_lr : 0.00005
+  albedo_lr : 0.001
+  delta_normal_lr : 0.001
+  roughness_lr : 0.0002
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  thresh_opa_prune: 0.05
+  densification_interval: 300
+  opacity_reset_interval: 5000
+  densify_from_iter: 500
+  densify_until_iter: 30_000
+  # densify_from_iter2: 15_000
+  # densify_until_iter2: 20_000
+  densify_grad_threshold: 0.0002
+  densify_grad_t_threshold: 0.002
+  temporal_split_from_iter: 30_000
+  temporal_split_until_iter: 50_000
+  densify_specular_time_threshold: 0.00001
+  opacity_zero_reset_iter: -1          # one-time reset disabled (was 0.5 mid-run)
+  # --- scene time model: 100 frames @30fps, t in [0, 3.3] ---
+  pcd_init_frame_start: 0
+  pcd_init_frame_end: 60
+  temporal_fps: 30.0
+  temporal_clip_t_min: 0.0
+  temporal_clip_t_max: 2.0
+  temporal_cap_frames: 32.5      # 61 frames: num_frames/2 + 2; static init needs 30.5f
+  # --- phase starts scaled x7/6 from the 60k base ---
+  lighting_start_iter: 9_000
+  local_feature_start_iter: 12_000
+  reset_opacity_high_until_iter: 25_000
+  densify_interval_schedule: "3001:100,15000:200,25000:300,35000:500,45000:500,-1:1000"
+  global_opacity_loss_until_iter: 30_000
+  local_opacity_loss_from_iter: 15_000
+  density_entropy_loss_from_iter: 3_000
+  opacity_zero_reset_value: 0.5
+  opacity_periodic_reset_interval: 3000
+  opacity_periodic_reset_value: 0.5
+  opacity_periodic_reset_from_iter: 0
+  opacity_periodic_reset_until_iter: 9000   # resets 0.5 @3k,6k,9k
+  temporal_opacity_k_start: 2.0
+  temporal_opacity_k_final: 12.0
+  temporal_opacity_k_ramp_start: 25_000
+  temporal_opacity_k_ramp_end: 40_000
+  temporal_opacity_k_loss_weight: 0.01
+  temporal_flat_radius_start_mult: 0.0
+  temporal_flat_radius_final_mult: 0.75
+  temporal_flat_radius_ramp_start: 25_000
+  temporal_flat_radius_ramp_end: 40_000
+  temporal_flat_radius_loss_weight: 0.05
+  train_num_workers: 4
+  debug_interval: 200
+  local_branch_lazy_init: True
+  densify_until_num_points: -1
+  final_prune_from_iter: -1
+  sh_increase_interval: 15_000
+  lambda_opa_mask: 0.0
+  lambda_rigid: 0.0
+  lambda_motion: 0.0
+  cam_affine_enable: True
+  cam_affine_lr: 0.001
+  cam_affine_from_iter: 1000
+  cam_affine_ssim_gate: 0.5

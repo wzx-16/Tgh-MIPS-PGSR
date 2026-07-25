@@ -77,6 +77,11 @@ class PipelineParams(ParamGroup):
         self.env_optimize_from = 0
         self.eval_shfs_4d = False
         self.temporal_opacity_mode = "normalized_sigmoid"
+        # local-branch temporal opacity mode override: "" = same as global
+        # (temporal_opacity_mode); "gaussian" = plain marginal for locals (the
+        # local effect-range penalties are then disabled and local init widens
+        # scaling_t per local_temporal_init_frames)
+        self.local_temporal_opacity_mode = ""
         self.temporal_flat_radius_mult = 0.75
         self.temporal_flat_edge_sigma_mult = 2.0
         self.sph_residual_keyframes = 0
@@ -92,6 +97,15 @@ class PipelineParams(ParamGroup):
         # smooth window). end <= start (default) = original hard gate at start.
         self.fourier_c2f_start_iter = 30_000
         self.fourier_c2f_end_iter = -1
+        # environment sphere separating scene content from env/background points
+        # (base-color source, densify inside/outside gating).  Defaults = the
+        # historical hardcoded abuzabi object values.
+        self.env_sphere_center = "0,0,0"
+        self.env_sphere_radius = 8.0
+        # diffuse color for inside-sphere points after lighting_start_iter:
+        # "albedo" (historical, learned albedo initialized from SH) or "sh_dc"
+        # (0-degree SH color evaluated directly, view-independent)
+        self.inside_diffuse_source = "albedo"
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -118,6 +132,11 @@ class OptimizationParams(ParamGroup):
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005
         self.rotation_lr = 0.001
+        # optional rotation LR decay (constant-LR groups carry tail noise);
+        # <= 0 = historical constant behavior
+        self.rotation_lr_final = -1.0
+        self.rotation_lr_delay_mult = 1.0
+        self.rotation_lr_max_steps = -1
         self.velocity2_lr_init = -1.0
         self.velocity2_lr_final = -1.0
         self.velocity2_lr_delay_mult = -1.0
@@ -162,6 +181,13 @@ class OptimizationParams(ParamGroup):
         # densification interval staircase: "until:interval,..." (iteration <
         # until; -1 = catch-all). Default = historical hardcoded schedule.
         self.densify_interval_schedule = "3001:100,15000:200,25000:300,35000:500,45000:500,-1:1000"
+        # per-frame point-cloud init window (inclusive frame indices into
+        # pcds_j10).  -1 = historical hardcoded behavior: the point-budget
+        # pre-pass counts frames 19..80 while the load loop takes 0..100
+        # bounded by time_duration.  Setting both applies the same window to
+        # count and load, sizing the per-frame point budget consistently.
+        self.pcd_init_frame_start = -1
+        self.pcd_init_frame_end = -1
         # scene time model (previously hardcoded for 60 frames @30fps):
         # frame-count-based window losses use temporal_fps; the clip t-range
         # clamps anchor temporal centers inside [t_min, t_max].
@@ -179,6 +205,10 @@ class OptimizationParams(ParamGroup):
         self.local_opacity_loss_from_iter = 15_000
         self.local_opacity_loss_until_iter = -1
         self.local_opacity_loss_weight = 0.01
+        # gaussian-mode local init: <= 0 (default) = per-gaussian match to the
+        # flat-window >0.05 effect range at clone time (statics stay wide,
+        # dynamics stay narrow); > 0 = uniform range of N frames (full width)
+        self.local_temporal_init_frames = -1.0
         self.density_entropy_loss_from_iter = 3_000
         self.density_entropy_loss_weight = 0.01
         self.densify_specular_time_threshold = 0.0000003

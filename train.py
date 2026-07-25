@@ -175,6 +175,9 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
     local_model.force_sh_3d = global_model.force_sh_3d
     local_model.time_duration = global_model.time_duration
     local_model.temporal_opacity_mode = global_model.temporal_opacity_mode
+    _topa_override = str(getattr(local_model, "temporal_opacity_mode_override", "") or "")
+    if _topa_override:
+        local_model.temporal_opacity_mode = _topa_override
     local_model.temporal_flat_radius_mult = global_model.temporal_flat_radius_mult
     local_model.temporal_flat_edge_sigma_mult = global_model.temporal_flat_edge_sigma_mult
 
@@ -188,6 +191,35 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
         if isinstance(src_val, torch.Tensor):
             src_tensor = src_val[:0] if empty else src_val
             setattr(local_model, attr, _clone_tensor_attr(src_tensor))
+
+    # gaussian-mode locals: rewrite the cloned scaling_t so the >0.05 opacity
+    # range is well-defined under the plain marginal.  Two modes:
+    #   local_temporal_init_frames <= 0 (default): PER-GAUSSIAN match to the
+    #     flat-window >0.05 range the point had at clone time — statics keep
+    #     full-clip support, dynamics keep their learned narrow windows.
+    #   local_temporal_init_frames > 0: uniform range of N frames (full width).
+    # half-range = exp(scaling_t) * sqrt(-2 ln 0.05) per get_marginal_t.
+    if (not empty and getattr(local_model, "temporal_opacity_mode", "") == "gaussian"
+            and isinstance(getattr(local_model, "_scaling_t", None), torch.Tensor)
+            and local_model._scaling_t.numel() > 0):
+        _fps = float(getattr(local_model, "scene_fps", 30.0))
+        _init_frames = float(getattr(training_args, "local_temporal_init_frames", -1.0)) if training_args is not None else -1.0
+        _denom = math.sqrt(-2.0 * math.log(0.05))
+        if _init_frames > 0:
+            _half_range = 0.5 * _init_frames / _fps
+            _target_s = _half_range / _denom
+            local_model._scaling_t.data.fill_(math.log(max(_target_s, 1.0e-8)))
+            print(f"Local gaussian-mode init: uniform scaling_t, >0.05 opacity range = "
+                  f"{_init_frames} frames (scaling_t={_target_s:.5f})")
+        else:
+            with torch.no_grad():
+                _half_range = global_model.get_temporal_range_for_opacity(0.05)
+                _target_s = torch.clamp_min(_half_range / _denom, 1.0e-8)
+                local_model._scaling_t.data.copy_(torch.log(_target_s))
+                _fw = (_half_range * 2.0 * _fps).squeeze(-1)
+                print(f"Local gaussian-mode init: scaling_t matched per-gaussian to flat-window "
+                      f">0.05 ranges (frames: median {_fw.median().item():.1f}, "
+                      f"min {_fw.min().item():.1f}, max {_fw.max().item():.1f})")
 
     if isinstance(global_model.max_radii2D, torch.Tensor):
         max_radii_src = global_model.max_radii2D[:0] if empty else global_model.max_radii2D
@@ -278,7 +310,7 @@ def evaluate_test_views(iteration, test_dataset, gaussians, local_gaussians, bac
             opacity = gaussians.get_opacity * mt
             shs = gaussians.get_features
             ma = (mt > 0.05).squeeze()
-            local_mt = local_gaussians.get_marginal_t(timestamp=timestamp)
+            local_mt = local_gaussians.get_temporal_opacity_factor(timestamp)
             local_ma = (local_mt > 0.05).squeeze()
             view_pos = viewpoint_cam.camera_center.repeat(gaussians.get_opacity.shape[0], 1)
             d_viewdir_normalized = safe_normalize(view_pos - xyz)
@@ -394,6 +426,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians.temporal_flat_radius_mult = pipe.temporal_flat_radius_mult
     gaussians.temporal_flat_edge_sigma_mult = pipe.temporal_flat_edge_sigma_mult
     local_gaussians.temporal_opacity_mode = pipe.temporal_opacity_mode
+    _local_topa_override = str(getattr(pipe, "local_temporal_opacity_mode", "") or "")
+    local_gaussians.temporal_opacity_mode_override = _local_topa_override
+    if _local_topa_override:
+        local_gaussians.temporal_opacity_mode = _local_topa_override
+        print(f"Local gaussians temporal opacity mode override: {_local_topa_override}")
     local_gaussians.temporal_flat_radius_mult = pipe.temporal_flat_radius_mult
     local_gaussians.temporal_flat_edge_sigma_mult = pipe.temporal_flat_edge_sigma_mult
     print("Temporal opacity mode:", pipe.temporal_opacity_mode)
@@ -409,6 +446,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if gaussians.fourier_c2f_end_iter > gaussians.fourier_c2f_start_iter:
         print(f"Coarse-to-fine Fourier features: bands anneal over "
               f"[{gaussians.fourier_c2f_start_iter}, {gaussians.fourier_c2f_end_iter}]")
+    # scene time model for init/split constants (defaults = abuzabi values)
+    _env_center = torch.tensor(
+        [float(v) for v in str(getattr(pipe, "env_sphere_center", "0,0,0")).split(",")],
+        device="cuda", dtype=torch.float32)
+    for _m in (gaussians, local_gaussians):
+        _m.scene_fps = float(getattr(opt, "temporal_fps", 30.0))
+        _m.scene_t_min = float(getattr(opt, "temporal_clip_t_min", 0.6666666666666666))
+        _m.scene_t_max = float(getattr(opt, "temporal_clip_t_max", 2.6333333333333333))
+        _m.env_center = _env_center
+        _m.env_radius = float(getattr(pipe, "env_sphere_radius", 8.0))
+        _m.inside_diffuse_source = str(getattr(pipe, "inside_diffuse_source", "albedo"))
+        _m.pcd_init_frame_start = int(getattr(opt, "pcd_init_frame_start", -1))
+        _m.pcd_init_frame_end = int(getattr(opt, "pcd_init_frame_end", -1))
     if getattr(pipe, "sph_time_min", -1.0) >= 0:
         gaussians.sph_time_min = pipe.sph_time_min
     if getattr(pipe, "sph_time_max", -1.0) >= 0:
@@ -725,7 +775,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     local_opacity_loss_weight = float(getattr(opt, "local_opacity_loss_weight", 0.01))
     density_entropy_loss_from_iter = int(getattr(opt, "density_entropy_loss_from_iter", 3_000))
     density_entropy_loss_weight = float(getattr(opt, "density_entropy_loss_weight", 0.01))
-    while iteration < opt.iterations + 1:
+    while iteration < opt.iterations:
         for _lim, _val in densify_interval_schedule:
             if _lim < 0 or iteration < _lim:
                 densification_interval = _val
@@ -791,6 +841,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if batch_size > 1 and gaussians.gaussian_dim == 4:
                 prev_t_grad_sum = torch.zeros(gaussians._t.shape[0], device="cuda")
                 batch_t_grad_abs = torch.zeros(gaussians._t.shape[0], device="cuda")
+            if batch_size > 1 and local_gaussians.gaussian_dim == 4:
+                local_prev_t_grad_sum = torch.zeros(local_gaussians._t.shape[0], device="cuda")
+                local_batch_t_grad_abs = torch.zeros(local_gaussians._t.shape[0], device="cuda")
             batch_local_point_grad = []
             batch_local_visibility_filter = []
             batch_local_radii = []
@@ -902,7 +955,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #opacity = opacity * (drop_mask.float() + 0.6).clamp(0, 1).unsqueeze(-1)
                 #ma = torch.logical_and(drop_mask, (mt > 0.05).squeeze())
                 ma = (mt > 0.05).squeeze()
-                local_mt = local_gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+                local_mt = local_gaussians.get_temporal_opacity_factor(viewpoint_cam.timestamp)
                 local_ma = (local_mt > 0.05).squeeze()
                 # mask_drop = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
                 # drop_ratio = 0.1 + ((iteration - 10000) * 0.1) / (30000 - 10000)
@@ -971,6 +1024,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     cv2.imwrite("./test{}/debug_render_{}.jpg".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name), np.hstack(((gt_image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8), (image.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8))))
                     if iteration % (2 * debug_interval) == 0:
                         print(xyz.size())
+                    # env-sphere debug: the renderer already rasterizes the
+                    # inside-sphere weight map (rendered_in, gates the deferred
+                    # shading pixels); dump it beside render_normal.png.
+                    if iteration % (2 * debug_interval) == 0:
+                        with torch.no_grad():
+                            torchvision.utils.save_image(render_pkg["rendered_in"].clamp(0.0, 1.0), "inside_mask.png")
                     # if iteration > 3000:
                     #     torchvision.utils.save_image(spec_coeff, "spec_coeff.png")
                 feature_map = render_pkg["feature_map"]
@@ -1218,6 +1277,28 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # loss += 1 * torch.clip(1.9666666666666666 - gaussians.get_t, min = 0.0).mean()
                 loss += 1 * torch.clip(temporal_clip_t_min - gaussians.get_t, min = 0.0).mean()
                 loss += 1 * torch.clip(gaussians.get_t - temporal_clip_t_max, min = 0.0).mean()
+
+                # Same temporal-window regularization for the local branch (it now
+                # uses flat-top windows + temporal splits like the global model):
+                # min effect-range pull, flat-radius cap, edge penalty, t clamps.
+                # Disabled entirely when the local branch runs plain gaussian
+                # temporal opacity (local_temporal_opacity_mode "gaussian").
+                _local_topa_mode = getattr(local_gaussians, "temporal_opacity_mode", pipe.temporal_opacity_mode)
+                if (_local_topa_mode != "gaussian" and local_gaussians.gaussian_dim == 4
+                        and iteration >= local_feature_start_iter and local_gaussians.get_xyz.shape[0] > 0):
+                    local_effect_range = local_gaussians.get_temporal_range_for_opacity(0.05)
+                    local_edge_effect_range = None
+                    if _local_topa_mode == "flat_window":
+                        local_high_opa_effect_range = local_gaussians.get_temporal_flat_radius()
+                        local_edge_effect_range = local_gaussians.get_temporal_edge_sigma() * math.sqrt(-2.0 * math.log(0.05))
+                    else:
+                        local_high_opa_effect_range = local_gaussians.get_temporal_range_for_opacity(0.95)
+                    loss += 0.01 * safe_mean(torch.clip(temporal_min_effect_range - local_effect_range, min=0.0))
+                    loss += safe_mean(torch.clip(local_high_opa_effect_range - temporal_cap_range, min=0.0))
+                    if local_edge_effect_range is not None:
+                        loss += 0.05 * safe_mean(torch.clip(local_edge_effect_range - temporal_min_effect_range, min=0.0))
+                    loss += 1 * safe_mean(torch.clip(temporal_clip_t_min - local_gaussians.get_t, min=0.0))
+                    loss += 1 * safe_mean(torch.clip(local_gaussians.get_t - temporal_clip_t_max, min=0.0))
                 # Smooth temporal barrier: keep gradients near the time limits.
                 # time_lower, time_upper = 0.6666666666666666, 2.6333333333333333
                 # time_lower, time_upper = 0, 3
@@ -1377,6 +1458,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if local_viewspace_point_tensor.grad is not None:
                     local_point_grad = torch.norm(local_viewspace_point_tensor.grad[:, :2], dim=-1)
                 batch_local_point_grad.append(local_point_grad)
+                if batch_size > 1 and local_gaussians.gaussian_dim == 4:
+                    local_cur_t_grad = local_gaussians._t.grad[:, 0].detach().clone() if local_gaussians._t.grad is not None else torch.zeros(local_gaussians._t.shape[0], device="cuda")
+                    local_batch_t_grad_abs += (local_cur_t_grad - local_prev_t_grad_sum).abs()
+                    local_prev_t_grad_sum = local_cur_t_grad
                 batch_local_radii.append(local_radii)
                 batch_local_visibility_filter.append(local_visibility_filter)
                 # loss_end = time.time()
@@ -1415,10 +1500,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     batch_t_grad = None
 
                 if local_gaussians.gaussian_dim == 4:
-                    if local_gaussians._t.grad is not None:
-                        local_batch_t_grad = local_gaussians._t.grad.clone()[:, 0].detach()
-                    else:
-                        local_batch_t_grad = torch.zeros_like(local_gaussians._t[:, 0].detach())
+                    # abs-of-per-view t-grads (exp78 criterion) for the local
+                    # branch, mirroring the global batched path
+                    local_batch_t_grad = local_batch_t_grad_abs.clone()
                     local_batch_t_grad[local_visibility_filter] = local_batch_t_grad[local_visibility_filter] * batch_size / local_visibility_count[local_visibility_filter]
                     local_batch_t_grad = local_batch_t_grad.unsqueeze(1)
                 else:
@@ -1621,22 +1705,26 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # if iteration % 3000 == 0:
                     #     gaussians.reset_opacity_large()
 
-                if iteration <= opt.densify_until_iter and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points) and iteration >= local_feature_start_iter:
+                if (iteration <= opt.densify_until_iter or global_temporal_split_active) and (opt.densify_until_num_points < 0 or local_gaussians.get_xyz.shape[0] < opt.densify_until_num_points) and iteration >= local_feature_start_iter:
                     local_gaussians.max_radii2D[local_visibility_filter] = torch.max(local_gaussians.max_radii2D[local_visibility_filter], local_radii[local_visibility_filter])
                     if batch_size == 1:
                         if local_viewspace_point_tensor.grad is not None and local_viewspace_point_tensor_abs.grad is not None:
                             local_gaussians.add_densification_stats_pgsr(local_viewspace_point_tensor, local_viewspace_point_tensor_abs, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None, add_specular_grads)
                     else:
-                        local_gaussians.add_densification_stats_grad(batch_local_viewspace_point_grad, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None)
+                        local_gaussians.add_densification_stats_grad(batch_local_viewspace_point_grad, local_visibility_filter, local_batch_t_grad if local_gaussians.gaussian_dim == 4 else None, add_specular_time_grad=add_specular_grads)
 
-                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter)) and (iteration % (densification_interval // 2) == 0):
+                    # temporal splits for the local branch on the global split
+                    # cadence (every 2*interval inside the split window); spatial
+                    # densify keeps its historical cadence within the densify window
+                    # no temporal splits for gaussian-mode locals (their wide
+                    # marginals make the flat-window split geometry meaningless)
+                    local_densify_split_time = (global_temporal_split_active
+                                                and (iteration % (2 * densification_interval) == 0)
+                                                and getattr(local_gaussians, "temporal_opacity_mode", "") != "gaussian")
+                    if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or local_densify_split_time) and (iteration % (densification_interval // 2) == 0):
                         local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                        if iteration >= 20000000:
-                            local_densify_split_time = True
-                        else:
-                            local_densify_split_time = False
                         local_spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and local_densify_split_time) else None
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr)
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         if iteration <= 30000:
@@ -1724,9 +1812,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             # train_end = time.time()
             # print(f"train time:{train_end - train_start:.6f} seconds")
             profiler.end_iter()
+            # Terminate exactly at the configured budget. Without this the epoch
+            # for-loop runs on to the next epoch boundary with the optimizer
+            # inert (steps are gated by iteration < opt.iterations but grads
+            # keep accumulating unstepped), wasting minutes per run.
+            if iteration >= opt.iterations:
+                break
 
 
-def prepare_output_and_logger(args):    
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')

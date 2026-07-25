@@ -137,6 +137,9 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
     local_model.force_sh_3d = global_model.force_sh_3d
     local_model.time_duration = global_model.time_duration
     local_model.temporal_opacity_mode = global_model.temporal_opacity_mode
+    _topa_override = str(getattr(local_model, "temporal_opacity_mode_override", "") or "")
+    if _topa_override:
+        local_model.temporal_opacity_mode = _topa_override
     local_model.temporal_flat_radius_mult = global_model.temporal_flat_radius_mult
     local_model.temporal_flat_edge_sigma_mult = global_model.temporal_flat_edge_sigma_mult
 
@@ -287,7 +290,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         #     ma = ma < (1 - 0.3)
         # ma = torch.logical_and(ma, (mt > 0.05).squeeze())
         ma = (mt > 0.05).squeeze()
-        local_mt = local_gaussians.get_marginal_t(timestamp=viewpoint_cam.timestamp)
+        local_mt = local_gaussians.get_temporal_opacity_factor(viewpoint_cam.timestamp)
         local_ma = (local_mt > 0.05).squeeze()
         print("active sh", gaussians.active_sh_degree)
         gaussians.brdf_mlp.build_mips()
@@ -373,10 +376,21 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
         tgh = TemperalGaussianHierarchy(dataset.sh_degree, 9, 10,  gaussian_dim=4, time_duration=[0, 30], rot_4d=True, force_sh_3d=False, sh_degree_t=2)
         gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
         local_gaussians = GaussianModel(dataset.sh_degree, gaussian_dim=4, rot_4d=True)
+        _env_center = torch.tensor(
+            [float(v) for v in str(getattr(pipeline, "env_sphere_center", "0,0,0")).split(",")],
+            device="cuda", dtype=torch.float32)
+        for _m in (gaussians, local_gaussians):
+            _m.env_center = _env_center
+            _m.env_radius = float(getattr(pipeline, "env_sphere_radius", 8.0))
+            _m.inside_diffuse_source = str(getattr(pipeline, "inside_diffuse_source", "albedo"))
         gaussians.temporal_opacity_mode = pipeline.temporal_opacity_mode
         gaussians.temporal_flat_radius_mult = pipeline.temporal_flat_radius_mult
         gaussians.temporal_flat_edge_sigma_mult = pipeline.temporal_flat_edge_sigma_mult
         local_gaussians.temporal_opacity_mode = pipeline.temporal_opacity_mode
+        _local_topa_override = str(getattr(pipeline, "local_temporal_opacity_mode", "") or "")
+        local_gaussians.temporal_opacity_mode_override = _local_topa_override
+        if _local_topa_override:
+            local_gaussians.temporal_opacity_mode = _local_topa_override
         local_gaussians.temporal_flat_radius_mult = pipeline.temporal_flat_radius_mult
         local_gaussians.temporal_flat_edge_sigma_mult = pipeline.temporal_flat_edge_sigma_mult
         gaussians.fourier_c2f_start_iter = getattr(pipeline, "fourier_c2f_start_iter", 30_000)

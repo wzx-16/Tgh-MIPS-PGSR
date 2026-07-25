@@ -674,6 +674,11 @@ class GaussianModel:
         self.temporal_schedule_iteration = None
 
         
+        # Scene time model (settable from config via train.py stamping; defaults
+        # reproduce the historical hardcoded 60-frames-@30fps abuzabi values).
+        self.scene_fps = 30.0
+        self.scene_t_min = 0.6666666666666666
+        self.scene_t_max = 2.6333333333333333
         # 16-dim env feature. This is the single knob that controls the feature
         # dim (init_light_env passes it explicitly into SphMipEncoding and derives
         # light_mlp/light_mlp_2 input widths from it). 32 was tried twice (exp76,
@@ -2232,7 +2237,9 @@ class GaussianModel:
         pcd_list = os.listdir(os.path.join(path, 'pcds_j10'))
         #pcd_list = ["points3d.ply" for i in range(200)]
         pcd_list = sorted(pcd_list)
-        fps = 30.
+        fps = float(getattr(self, "scene_fps", 30.0))
+        scene_t_min = float(getattr(self, "scene_t_min", 0.6666666666666666))
+        scene_t_max = float(getattr(self, "scene_t_max", 2.6333333333333333))
         temporal_init_range_level = 0.05
         temporal_init_edge_range = 0.5 / fps
         temporal_init_edge_sigma = temporal_init_edge_range / math.sqrt(-2.0 * math.log(temporal_init_range_level))
@@ -2243,7 +2250,9 @@ class GaussianModel:
         temporal_init_flat_radius = 0.5 / fps
         # temporal_init_flat_raw = math.log(math.expm1(max(temporal_init_flat_radius, 1.0e-8)))
         temporal_init_flat_raw = temporal_init_flat_radius
-        temporal_static_init_flat_radius = 30.0 / fps
+        # static points cover the whole clip: half the time range plus half a
+        # frame of margin (== the historical 30/fps for 60 frames @30fps)
+        temporal_static_init_flat_radius = (scene_t_max - scene_t_min) / 2.0 + 0.5 / fps
         # temporal_static_init_flat_raw = math.log(math.expm1(max(temporal_static_init_flat_radius, 1.0e-8)))
         temporal_static_init_flat_raw = temporal_static_init_flat_radius
         #temporal_init_sigma_t_fixed = max(temporal_init_edge_sigma + temporal_init_flat_radius, 1.0)
@@ -2263,8 +2272,17 @@ class GaussianModel:
         frame_filter_set = _parse_frame_filter(frame_filter)
         points_before = None
         selected_frame_count = 0
+        # configurable per-frame init window (inclusive); -1 keeps the historical
+        # windows: count 19..80, load 0..100 (each further bounded by time_duration)
+        init_f0 = int(getattr(self, "pcd_init_frame_start", -1))
+        init_f1 = int(getattr(self, "pcd_init_frame_end", -1))
+        count_lo = init_f0 if init_f0 >= 0 else 19
+        count_hi = init_f1 if init_f1 >= 0 else 80
+        load_lo = init_f0 if init_f0 >= 0 else 0
+        load_hi = init_f1 if init_f1 >= 0 else 100
+        print(f"Per-frame pcd init window: count {count_lo}..{count_hi}, load {load_lo}..{load_hi}")
         for frame_idx, _ in enumerate(pcd_list[:]):
-            if frame_idx < 81 and frame_idx >= 19:
+            if frame_idx >= count_lo and frame_idx <= count_hi:
                 if frame_filter_set is not None and frame_idx not in frame_filter_set:
                     continue
                 timestamp = frame_idx / fps
@@ -2279,7 +2297,7 @@ class GaussianModel:
             for ii, pcd_path in enumerate(pcd_list[:]):
                 #if ii < 1:
                 
-                if ii < 81 and ii >= 19:
+                if ii >= load_lo and ii <= load_hi:
                     if frame_filter_set is not None and ii not in frame_filter_set:
                         continue
                 #if ii < 60 and ii >= 0:
@@ -2432,7 +2450,7 @@ class GaussianModel:
             #timestamp = 2.4
             #timestamp = (1.6666666666666667 + 2.6333333333333333) / 2
             #timestamp = (1.9666666666666666 + 0.0) / 2
-            timestamp = (2.6333333333333333 + 0.6666666666666666) / 2
+            timestamp = (scene_t_max + scene_t_min) / 2
             #timestamp = (0.03333333333333333 + 0.03333333333333333) / 2
             # print(timestamp, 'sdfdfdfd')
             # if time_duration is not None:
@@ -2452,7 +2470,7 @@ class GaussianModel:
                 # dist_t = torch.zeros_like(fused_times, device=self.device) + (self.time_duration[1] - self.time_duration[0]) / 100
                 #dist_t = (torch.zeros_like(fused_times, device=self.device) + 20) / 1
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (1.9666666666666666 - 0.0) / 2
-                dist_t = torch.zeros_like(fused_times, device=self.device) + (2.6333333333333333 - 0.6666666666666666) / 2
+                dist_t = torch.zeros_like(fused_times, device=self.device) + (scene_t_max - scene_t_min) / 2
                 #dist_t = torch.zeros_like(fused_times, device=self.device) + (2.4 - 2.3333333333333335) / 2
                 # dist_t = torch.zeros_like(fused_times, device=self.device)
                 # Static points use the same sharp edge, but a much wider
@@ -2650,6 +2668,17 @@ class GaussianModel:
                                                     lr_final=training_args.rotation_lr / 60,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
+        # optional rotation LR decay (rotation_lr_final <= 0 keeps the historical
+        # constant LR): the rotation group is one of the never-annealed groups
+        # that carry gradient noise into the LR tail
+        _rot_lr_final = float(getattr(training_args, "rotation_lr_final", -1.0))
+        if _rot_lr_final > 0:
+            self.rotation_scheduler_args = get_expon_lr_func(lr_init=training_args.rotation_lr,
+                                                        lr_final=_rot_lr_final,
+                                                        lr_delay_mult=float(getattr(training_args, "rotation_lr_delay_mult", 1.0)),
+                                                        max_steps=int(getattr(training_args, "rotation_lr_max_steps", training_args.position_lr_max_steps)))
+        else:
+            self.rotation_scheduler_args = None
         self.velocity2_scheduler_args = get_expon_lr_func(lr_init=self._velocity2_lr_init,
                                                     lr_final=self._velocity2_lr_final,
                                                     lr_delay_mult=self._velocity2_lr_delay_mult,
@@ -2710,6 +2739,8 @@ class GaussianModel:
                 lr = self.velocity_scheduler_args(iteration)
                 param_group["lr"] = lr
                 #return lr
+            if param_group["name"] == "rotation" and getattr(self, "rotation_scheduler_args", None) is not None:
+                param_group["lr"] = self.rotation_scheduler_args(iteration)
             if param_group["name"] == "brdf_mlp":
                 lr = self.brdf_mlp_scheduler_args(iteration)
                 param_group["lr"] =lr
@@ -3042,7 +3073,7 @@ class GaussianModel:
         # # else:
         # spread_mask = spatial_spread_mask
         selected_pts_mask = torch.zeros((n_init_points), dtype=torch.bool, device="cuda")
-        half_frame = 0.5 / 30.0
+        half_frame = 0.5 / float(getattr(self, "scene_fps", 30.0))
         flat_radius_mask = self.get_temporal_flat_radius().squeeze(-1) >= half_frame
         # Photometric time-gradient criterion, self-calibrating: select the top 1%
         # of points by mean |dL/dt| each split event (bounded; the flat-radius /
@@ -3065,12 +3096,11 @@ class GaussianModel:
             padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
-            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (1 / 30 / 2)
-            #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-            ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-            #ENV_RADIUS = 1.6
-            ENV_RADIUS = 8
-            #ENV_RADIUS = 2
+            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (0.5 / float(getattr(self, "scene_fps", 30.0)))
+            ENV_CENTER = getattr(self, "env_center", None)
+            if ENV_CENTER is None:
+                ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+            ENV_RADIUS = float(getattr(self, "env_radius", 8.0))
             xyz = self.get_xyz
             outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
             gs_in = torch.ones(xyz.shape[0], device="cuda")
@@ -3205,7 +3235,7 @@ class GaussianModel:
             padded_grad_spec_t[:grads_spec_t.shape[0]] = grads_spec_t.squeeze()
             selected_pts_mask = torch.logical_or(selected_pts_mask, padded_grad_spec_t >= grad_spec_t_threshold)
             print("max grads_spec_t: ", padded_grad_spec_t.max())
-            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (1 / 30 / 2)
+            min_scale_t_mask = self.get_temporal_range_for_opacity(0.05).squeeze(-1) > (0.5 / float(getattr(self, "scene_fps", 30.0)))
             print("mask size", selected_pts_mask.sum(), min_scale_t_mask.sum())
             selected_pts_mask = torch.logical_and(selected_pts_mask, min_scale_t_mask)
         # print(f"num_to_densify_pos: {torch.where(padded_grad >= grad_threshold, True, False).sum()}, num_to_split_pos: {selected_pts_mask.sum()}")
@@ -3394,13 +3424,13 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         if low_opa:
             new_opacities = self.inverse_opacity_activation(1 - (1 - self.opacity_activation(new_opacities)) ** 0.5)
-            # KNOWN NO-OP, kept deliberately: this assigns into an advanced-indexing
-            # temporary, so the parent keeps full opacity while the child gets the
-            # reduced value. Fixing it to `self._opacity.data[mask] = ...` was tested
-            # twice (exp73 bundle -0.05, exp82 single-variable -0.17 vs exp78) and
-            # lost both times — parents staying opaque during pre-9k clones is
-            # load-bearing for early densification dynamics.
-            self._opacity[selected_pts_mask].data = new_opacities
+            # Opacity-conserving clone: BOTH parent and child get the reduced
+            # opacity (1 - sqrt(1 - o)), so the composited pair matches the
+            # original.  History: on abuzabi 60f the parent-drop lost twice
+            # (exp73 bundle -0.05, exp82 single-variable -0.17 vs exp78) and the
+            # no-op `self._opacity[mask].data = ...` was kept; re-enabled by user
+            # direction 2026-07-25 for the 100f/spec campaign re-test.
+            self._opacity.data[selected_pts_mask] = new_opacities
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
         new_t = None
@@ -3448,11 +3478,10 @@ class GaussianModel:
                 continue
             for param in group["params"]:
                 param.grad = None
-        #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-        ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-        #ENV_RADIUS = 1.6
-        ENV_RADIUS = 8
-        #ENV_RADIUS = 2
+        ENV_CENTER = getattr(self, "env_center", None)
+        if ENV_CENTER is None:
+            ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+        ENV_RADIUS = float(getattr(self, "env_radius", 8.0))
         xyz = self.get_xyz
         outside_mask = self.get_outside_msk(xyz, ENV_CENTER, ENV_RADIUS)
         gs_in = torch.ones(xyz.shape[0], device="cuda", dtype=torch.bool)

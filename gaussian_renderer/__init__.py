@@ -569,11 +569,10 @@ def render_3d_pgsr_anti(
     view_pos = viewpoint_camera.camera_center
     diffuse = pc.get_diffuse(dir_pp)
     #rgb = torch.clamp_min(rgb + 0.5, -torch.log(torch.tensor(5.0, device=rgb.device)))
-    #ENV_CENTER = torch.tensor([0, 1, 3], device="cuda")
-    ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
-    #ENV_RADIUS = 1.6
-    #ENV_RADIUS = 2
-    ENV_RADIUS = 8
+    ENV_CENTER = getattr(pc, "env_center", None)
+    if ENV_CENTER is None:
+        ENV_CENTER = torch.tensor([0, 0, 0], device="cuda")
+    ENV_RADIUS = float(getattr(pc, "env_radius", 8.0))
     outside_mask = get_outside_msk(means3D, ENV_CENTER, ENV_RADIUS)
     gs_in = torch.ones_like(opacity)
     gs_in[outside_mask] = 0.0
@@ -586,7 +585,7 @@ def render_3d_pgsr_anti(
 
     if local_pc.gaussian_dim == 4:
         local_xyz = local_pc.get_xyz + local_pc.get_velocity * (viewpoint_camera.timestamp - local_pc.get_t) / local_pc.get_sigma_t_fixed
-        local_mt = local_pc.get_marginal_t(timestamp=viewpoint_camera.timestamp)
+        local_mt = local_pc.get_temporal_opacity_factor(viewpoint_camera.timestamp)
         local_opacity = local_pc.get_opacity * local_mt
         if local_mask is None:
             local_mask = (local_mt > 0.05).squeeze()
@@ -613,7 +612,10 @@ def render_3d_pgsr_anti(
     roughness = pc.get_roughness
     delta_normal = pc.get_delta_normal
     color = torch.zeros_like(diffuse)
-    if iteration < 9000:
+    # base-color source must flip to albedo at the same iteration train.py runs
+    # reset_albedo_from_sh (lighting_start_iter); a hardcoded 9000 here rendered
+    # zero albedo for 9000..lighting_start_iter when the config moved the start
+    if iteration < lighting_start_iter:
         rgb = eval_sh(pc.active_sh_degree, pc.get_features.transpose(1, 2), dir_pp)
         rgb = torch.clamp_min(rgb + 0.5, 0.0)
         color = rgb
@@ -622,7 +624,15 @@ def render_3d_pgsr_anti(
     else:
         # Only points outside the environment sphere use SH colors; evaluate SH just for them.
         outside_idx = outside_mask.nonzero(as_tuple=True)[0]
-        color[~outside_mask] = albedo[~outside_mask]
+        # inside-sphere diffuse source: learned albedo (historical) or the
+        # 0-degree SH color (view-independent DC term), per inside_diffuse_source
+        if getattr(pc, "inside_diffuse_source", "albedo") == "sh_dc":
+            inside_idx = (~outside_mask).nonzero(as_tuple=True)[0]
+            if inside_idx.numel() > 0:
+                rgb_in = eval_sh(0, pc.get_features[inside_idx].transpose(1, 2), dir_pp[inside_idx])
+                color[inside_idx] = torch.clamp_min(rgb_in + 0.5, 0.0)
+        else:
+            color[~outside_mask] = albedo[~outside_mask]
         if outside_idx.numel() > 0:
             rgb_out = eval_sh(pc.active_sh_degree, pc.get_features[outside_idx].transpose(1, 2), dir_pp[outside_idx])
             color[outside_idx] = torch.clamp_min(rgb_out + 0.5, 0.0)
