@@ -106,6 +106,23 @@ class PipelineParams(ParamGroup):
         # "albedo" (historical, learned albedo initialized from SH) or "sh_dc"
         # (0-degree SH color evaluated directly, view-independent)
         self.inside_diffuse_source = "albedo"
+        # zero-init light_mlp_2's final-layer weights so the local-feature
+        # pathway starts with zero contribution to spec_light (neutral exp
+        # factor) and only grows as needed - keeps diffuse brightness on the
+        # base color instead of being absorbed via local features
+        self.local_light_mlp_zero_init = False
+        # how the two light MLPs combine into spec_light:
+        #   "exp_sum" (historical): exp(mlp_base + mlp2) - multiplicative interaction
+        #   "sum_exp": exp(mlp_base) + exp(mlp2) - two additive positive light
+        #     terms; with local_light_mlp_zero_init the mlp2 term starts at a
+        #     TRUE zero (~exp(-5)) instead of a neutral factor
+        self.spec_light_combine = "exp_sum"
+        # include roughness + cos(normal, reflection) in light_mlp_2's input
+        # (historical True). False removes them, severing the gradient path from
+        # the local light branch into geometry/normals.
+        self.local_light_mlp_geo_inputs = True
+        # keep cos_nr as an mlp2 input but stop its gradient into the normals
+        self.local_light_mlp_detach_cos = False
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -209,8 +226,27 @@ class OptimizationParams(ParamGroup):
         # flat-window >0.05 effect range at clone time (statics stay wide,
         # dynamics stay narrow); > 0 = uniform range of N frames (full width)
         self.local_temporal_init_frames = -1.0
+        # local spawn semantics (sc-project match): born feature-black + dim so
+        # the local feature map starts gray and only develops where reflection
+        # gradients paint it.  zero_feature False = clone trained _specular;
+        # spawn_opacity outside (0,1) = keep cloned opacities.
+        self.local_spawn_zero_feature = True
+        self.local_spawn_opacity = 0.1
+        # local prune: lower opacity bar than the global thresh_opa_prune, and
+        # only a random fraction of eligible candidates removed per prune event
+        # (gradual drain keeps the normalized local feature map stable;
+        # 1.0 = prune all candidates, <= 0 = never opacity/size-prune locals)
+        self.local_thresh_opa_prune = 0.01
+        self.local_prune_sample_fraction = 0.1
+        # local reset_opacity_high (>0.995 -> 0.99) runs on the opacity reset
+        # cadence while iteration <= this; negative disables
+        self.local_reset_opacity_high_until_iter = 30_000
         self.density_entropy_loss_from_iter = 3_000
         self.density_entropy_loss_weight = 0.01
+        # monocular prior losses (sgt_depth / sgt_normal) stop iterations;
+        # -1 = never stop. Defaults = historical hardcoded schedule.
+        self.mono_depth_loss_until_iter = 40_000
+        self.mono_normal_loss_until_iter = 20_000
         self.densify_specular_time_threshold = 0.0000003
         self.temporal_split_from_iter = 25_000
         self.temporal_split_until_iter = 35_000

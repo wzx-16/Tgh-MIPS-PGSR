@@ -1017,10 +1017,18 @@ def render_3d_pgsr_anti(
             #     [spec_feat, sph_outer_feature, local_feature_selected, roughness_selected, cos_nr],
             #     dim=-1,
             # )
-            input_mlp = torch.cat(
-                [spec_feat, local_feature_selected, roughness_selected, cos_nr],
-                dim=-1,
-            )
+            if getattr(pc, "local_light_mlp_geo_inputs", True):
+                # optionally detach cos(normal, reflection) so it informs the MLP
+                # without a gradient path back into the normals
+                _cos_in = cos_nr.detach() if getattr(pc, "local_light_mlp_detach_cos", False) else cos_nr
+                input_mlp = torch.cat(
+                    [spec_feat, local_feature_selected, roughness_selected, _cos_in],
+                    dim=-1,
+                )
+            else:
+                # no roughness / cos_nr: the local light branch gets no gradient
+                # path into geometry or normals
+                input_mlp = torch.cat([spec_feat, local_feature_selected], dim=-1)
             # input_mlp = torch.cat(
             #     [local_feature_selected, roughness_selected, cos_nr],
             #     dim=-1,
@@ -1066,7 +1074,13 @@ def render_3d_pgsr_anti(
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
             mlp_output_base = torch.zeros_like(mlp_output)
         mlp_output_sum = mlp_output + mlp_output_base
-        spec_light = torch.exp(torch.clamp(mlp_output_sum, max=5.0))
+        if getattr(pc, "spec_light_combine", "exp_sum") == "sum_exp":
+            # two additive positive light terms: global-feature light + local-
+            # feature light; with zero-init the local term starts at ~exp(-5)=0
+            spec_light = (torch.exp(torch.clamp(mlp_output_base, max=5.0))
+                          + torch.exp(torch.clamp(mlp_output, max=5.0)))
+        else:
+            spec_light = torch.exp(torch.clamp(mlp_output_sum, max=5.0))
         #spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")

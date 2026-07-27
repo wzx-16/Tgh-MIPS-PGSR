@@ -192,6 +192,24 @@ def initialize_local_gaussian_model(global_model: GaussianModel, local_model: Ga
             src_tensor = src_val[:0] if empty else src_val
             setattr(local_model, attr, _clone_tensor_attr(src_tensor))
 
+    # sc-project spawn semantics: locals are born feature-black and dim so the
+    # local feature map starts gray and only develops where reflection
+    # gradients paint it.  Cloning the trained global _specular/_opacity (lazy
+    # spawn at 6k) instead covered the whole scene with full-strength features
+    # that F.normalize keeps at unit norm no matter how far the sparsity loss
+    # pushes opacity down — the map could never return to gray at
+    # non-reflective regions.
+    if not empty:
+        _zero_feat = bool(getattr(training_args, "local_spawn_zero_feature", True)) if training_args is not None else True
+        _spawn_opa = float(getattr(training_args, "local_spawn_opacity", 0.1)) if training_args is not None else 0.1
+        if _zero_feat and isinstance(getattr(local_model, "_specular", None), torch.Tensor) and local_model._specular.numel() > 0:
+            local_model._specular.data.zero_()
+        if 0.0 < _spawn_opa < 1.0 and isinstance(getattr(local_model, "_opacity", None), torch.Tensor) and local_model._opacity.numel() > 0:
+            local_model._opacity.data.fill_(math.log(_spawn_opa / (1.0 - _spawn_opa)))
+        if local_model._xyz.numel() > 0:
+            print(f"Local spawn: zero_feature={_zero_feat}, opacity="
+                  f"{_spawn_opa if 0.0 < _spawn_opa < 1.0 else 'cloned'}")
+
     # gaussian-mode locals: rewrite the cloned scaling_t so the >0.05 opacity
     # range is well-defined under the plain marginal.  Two modes:
     #   local_temporal_init_frames <= 0 (default): PER-GAUSSIAN match to the
@@ -457,6 +475,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         _m.env_center = _env_center
         _m.env_radius = float(getattr(pipe, "env_sphere_radius", 8.0))
         _m.inside_diffuse_source = str(getattr(pipe, "inside_diffuse_source", "albedo"))
+        _m.local_light_mlp_zero_init = bool(getattr(pipe, "local_light_mlp_zero_init", False))
+        _m.spec_light_combine = str(getattr(pipe, "spec_light_combine", "exp_sum"))
+        _m.local_light_mlp_geo_inputs = bool(getattr(pipe, "local_light_mlp_geo_inputs", True))
+        _m.local_light_mlp_detach_cos = bool(getattr(pipe, "local_light_mlp_detach_cos", False))
         _m.pcd_init_frame_start = int(getattr(opt, "pcd_init_frame_start", -1))
         _m.pcd_init_frame_end = int(getattr(opt, "pcd_init_frame_end", -1))
     if getattr(pipe, "sph_time_min", -1.0) >= 0:
@@ -758,6 +780,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         _lim, _val = _part.split(":")
         densify_interval_schedule.append((int(_lim), int(_val)))
     reset_opacity_high_until_iter = getattr(opt, "reset_opacity_high_until_iter", 25000)
+    # local branch reset_opacity_high (trims opacities > 0.995 to 0.99) cutoff;
+    # historical hardcoded value was 30000. Negative disables it entirely.
+    local_reset_opacity_high_until_iter = int(getattr(opt, "local_reset_opacity_high_until_iter", 30_000))
     # temporal window loss constants (per-scene time model): all frame counts are
     # converted with temporal_fps; clip t-range clamps anchor gaussian centers.
     temporal_fps = float(getattr(opt, "temporal_fps", 30.0))
@@ -770,9 +795,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     global_opacity_loss_from_iter = int(getattr(opt, "global_opacity_loss_from_iter", -1))
     global_opacity_loss_until_iter = int(getattr(opt, "global_opacity_loss_until_iter", 30_000))
     global_opacity_loss_weight = float(getattr(opt, "global_opacity_loss_weight", 0.02))
+    mono_depth_loss_until_iter = int(getattr(opt, "mono_depth_loss_until_iter", 40_000))
+    mono_normal_loss_until_iter = int(getattr(opt, "mono_normal_loss_until_iter", 20_000))
     local_opacity_loss_from_iter = int(getattr(opt, "local_opacity_loss_from_iter", 15_000))
     local_opacity_loss_until_iter = int(getattr(opt, "local_opacity_loss_until_iter", -1))
     local_opacity_loss_weight = float(getattr(opt, "local_opacity_loss_weight", 0.01))
+    # local prune: much lower opacity bar than the global 0.05 and only a random
+    # fraction of the eligible candidates per event, so mass low-opacity cohorts
+    # (sparsity loss) leave the local feature map gradually, not all at once
+    local_thresh_opa_prune = float(getattr(opt, "local_thresh_opa_prune", 0.05))
+    local_prune_sample_fraction = float(getattr(opt, "local_prune_sample_fraction", 1))
     density_entropy_loss_from_iter = int(getattr(opt, "density_entropy_loss_from_iter", 3_000))
     density_entropy_loss_weight = float(getattr(opt, "density_entropy_loss_weight", 0.01))
     while iteration < opt.iterations:
@@ -956,7 +988,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #ma = torch.logical_and(drop_mask, (mt > 0.05).squeeze())
                 ma = (mt > 0.05).squeeze()
                 local_mt = local_gaussians.get_temporal_opacity_factor(viewpoint_cam.timestamp)
-                local_ma = (local_mt > 0.05).squeeze()
+                local_ma = (local_mt > 0.05).squeeze(-1)
+                #local_ma = torch.logical_or(local_mt > 0.05, local_gaussians.get_opacity[..., 0:1] > 0.05).squeeze(-1)
                 # mask_drop = torch.ones(opacity.shape[0], dtype=torch.bool, device=opacity.device)
                 # drop_ratio = 0.1 + ((iteration - 10000) * 0.1) / (30000 - 10000)
                 # if iteration <= 10000:
@@ -1029,7 +1062,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     # shading pixels); dump it beside render_normal.png.
                     if iteration % (2 * debug_interval) == 0:
                         with torch.no_grad():
-                            torchvision.utils.save_image(render_pkg["rendered_in"].clamp(0.0, 1.0), "inside_mask.png")
+                            torchvision.utils.save_image(render_pkg["rendered_in"].clamp(0.0, 1.0), f"inside_mask_{id}.png")
                     # if iteration > 3000:
                     #     torchvision.utils.save_image(spec_coeff, "spec_coeff.png")
                 feature_map = render_pkg["feature_map"]
@@ -1039,11 +1072,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image(feature_map[:3], "./test_feature{}/feature_map_{}.png".format(id, timestamp + "_" + str(iteration) + "_" + viewpoint_cam.image_name))
                 if iteration % (2 * debug_interval) == 0:
                     render_normal = render_pkg["rendered_normal"]
-                    torchvision.utils.save_image((render_normal + 1) / 2, "render_normal.png")
+                    torchvision.utils.save_image((render_normal + 1) / 2, f"render_normal_{id}.png")
                 if iteration % (2 * debug_interval) == 0 and rendered_delta_normal is not None:
-                    torchvision.utils.save_image((rendered_delta_normal + 1) / 2, "rendered_delta_normal.png")
+                    torchvision.utils.save_image((rendered_delta_normal + 1) / 2, f"rendered_delta_normal_{id}.png")
                 if iteration % (2 * debug_interval) == 0 and rendered_local_feature_map is not None:
-                    torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, "rendered_local_feature_map.png")
+                    torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, f"rendered_local_feature_map_{id}.png")
                 profiler.end("debug_io")
                 profiler.begin("loss_fwd")
                 #loss_start = time.time()
@@ -1084,7 +1117,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #print("loss 1", loss)
                 # spec_coeff = render_pkg["spec_coeff"]
                 # loss += 0.1 * ((1 - spec_coeff).mean())
-                if iteration < 40000:
+                if mono_depth_loss_until_iter < 0 or iteration < mono_depth_loss_until_iter:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -1111,13 +1144,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         predicted_depth_image = (predicted_depth - predicted_depth.min()) / (predicted_depth.max() - predicted_depth.min())
                         render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
                         #torchvision.utils.save_image(render_depth_image, "render_depth.png")
-                        torchvision.utils.save_image(predicted_depth_image, "predicted_depth.png")
+                        torchvision.utils.save_image(predicted_depth_image, f"predicted_depth_{id}.png")
 
                 if iteration % (2 * debug_interval) == 0:
                     render_depth = render_pkg["depth"]
                     render_depth_image = (render_depth - render_depth.min()) / (render_depth.max() - render_depth.min())
-                    torchvision.utils.save_image(render_depth_image, "render_depth.png")
-                if iteration < 20000:
+                    torchvision.utils.save_image(render_depth_image, f"render_depth_{id}.png")
+                if mono_normal_loss_until_iter < 0 or iteration < mono_normal_loss_until_iter:
                     with torch.no_grad():
                         # to_pil_image = transforms.ToPILImage()
                         # gt_pil = to_pil_image(gt_image)
@@ -1180,7 +1213,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # render_normal_norm[1, 0:30, 0:30] = 1
                         # render_normal_norm[2, 0:30, 0:30] = 0
                         # torchvision.utils.save_image((render_normal_norm + 1) / 2, "render_normal.png")
-                        torchvision.utils.save_image((normal_norm + 1) / 2, "predicted_normal.png")
+                        torchvision.utils.save_image((normal_norm + 1) / 2, f"predicted_normal_{id}.png")
                 #print("loss 2", loss)
                 #depth_image = depth_image.detach().cpu().numpy() * 255
                 # depth_image = depth_image.detach().cpu().numpy() * 255
@@ -1724,10 +1757,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     if ((iteration > opt.densify_from_iter and iteration <= opt.densify_until_iter) or local_densify_split_time) and (iteration % (densification_interval // 2) == 0):
                         local_size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                         local_spec_time_thr = opt.densify_specular_time_threshold if (opt.densify_specular_time_threshold > 0 and local_densify_split_time) else None
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, opt.thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor)
+                        # Randomized gentle local prune (replaces the earlier
+                        # disable_prune=True): opacity bar 0.01 instead of the
+                        # global 0.05, and only local_prune_sample_fraction of the
+                        # eligible candidates (random subset) is removed per event.
+                        # Full-cohort pruning at 0.05 killed the branch (exp199-202:
+                        # 512k->2.5k within 3k iters of the sparsity loss start);
+                        # the random subset drains dead points gradually so the
+                        # normalized local feature map never changes abruptly.
+                        # fraction <= 0 disables opacity/size pruning entirely;
+                        # split-parent cleanup always runs via the deferred filter.
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, local_thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=True, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor, prune_sample_fraction=local_prune_sample_fraction)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                        if iteration <= 30000:
+                        if iteration <= local_reset_opacity_high_until_iter:
                             local_gaussians.reset_opacity_high()
                 # if iteration == 500000:
                 #     tgh.reset_diffuse()

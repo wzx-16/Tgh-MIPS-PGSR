@@ -383,6 +383,9 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             _m.env_center = _env_center
             _m.env_radius = float(getattr(pipeline, "env_sphere_radius", 8.0))
             _m.inside_diffuse_source = str(getattr(pipeline, "inside_diffuse_source", "albedo"))
+            _m.spec_light_combine = str(getattr(pipeline, "spec_light_combine", "exp_sum"))
+            _m.local_light_mlp_geo_inputs = bool(getattr(pipeline, "local_light_mlp_geo_inputs", True))
+            _m.local_light_mlp_detach_cos = bool(getattr(pipeline, "local_light_mlp_detach_cos", False))
         gaussians.temporal_opacity_mode = pipeline.temporal_opacity_mode
         gaussians.temporal_flat_radius_mult = pipeline.temporal_flat_radius_mult
         gaussians.temporal_flat_edge_sigma_mult = pipeline.temporal_flat_edge_sigma_mult

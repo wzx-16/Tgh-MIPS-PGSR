@@ -836,8 +836,9 @@ class GaussianModel:
         #     nn.ReLU(inplace=True),
         #     nn.Linear(64, 3),
         # ).cuda()
+        _mlp2_geo = 2 if getattr(self, "local_light_mlp_geo_inputs", True) else 0
         self.light_mlp_2 = nn.Sequential(
-            nn.Linear(self.gsdim + self.sph_dim + 2, 64),
+            nn.Linear(self.gsdim + self.sph_dim + _mlp2_geo, 64),
             nn.ReLU(inplace=True),
             nn.Linear(64, 64),
             nn.ReLU(inplace=True),
@@ -845,7 +846,23 @@ class GaussianModel:
             nn.ReLU(inplace=True),
             nn.Linear(64, 3),
         ).cuda()
-        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))        
+        nn.init.constant_(self.light_mlp_2[-1].bias, np.log(0.25))
+        # zero-init the final layer WEIGHTS (bias kept) so light_mlp_2's output
+        # starts as a constant independent of the local features: the local
+        # pathway contributes exactly nothing to spec_light at init (its exp
+        # factor is a flat 0.25) and fades in only as gradients populate the
+        # zeroed weights - prevents the additive light from absorbing diffuse
+        # brightness through the local branch early on.
+        if getattr(self, "local_light_mlp_zero_init", False):
+            nn.init.zeros_(self.light_mlp_2[-1].weight)
+            if getattr(self, "spec_light_combine", "exp_sum") == "sum_exp":
+                # additive combine: exp(-5) ~ 0.007 => the local light term
+                # starts at a TRUE near-zero and fades in (gradient scale is
+                # exp(bias), so much more negative would be untrainable)
+                nn.init.constant_(self.light_mlp_2[-1].bias, -5.0)
+                print("light_mlp_2 final layer zero-initialized (sum_exp: local light term starts ~0)")
+            else:
+                print("light_mlp_2 final layer zero-initialized (local pathway starts neutral)")
 
         # self.light_mlp_2 = SpecLightMLP(
         #     base_dim=self.gsdim + self.sph_dim + 2,
@@ -3468,7 +3485,7 @@ class GaussianModel:
 
             self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_t, new_scaling_t, new_velocity, new_velocity2, new_velocity3, new_rot_velocity, new_specular, new_albedo, new_specular2, new_delta_normal, new_roughness)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False, grad_t_quantile=0.99, grad_t_floor=0.0):
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, iteration, max_grad_t=None, max_specular_time_grad=None, prune_only=False, disable_prune=False, split_time=False, grad_t_quantile=0.99, grad_t_floor=0.0, prune_sample_fraction=1.0):
         # Every per-gaussian parameter gets replaced by a new nn.Parameter below
         # (grad=None), so the optimizer step that follows can never consume the
         # old .grad buffers; dropping them first removes a params-worth of
@@ -3549,11 +3566,22 @@ class GaussianModel:
 
             padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
             padded_outside_mask[:outside_mask.shape[0]] = outside_mask
-            prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < 0.05).squeeze(), padded_outside_mask))
+            # outside-sphere bar is capped at the historical 0.05 but follows
+            # min_opacity below it, so callers with a lower bar (local branch
+            # at 0.01) get it on both sides of the env sphere
+            prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < min(min_opacity, 0.05)).squeeze(), padded_outside_mask))
             if max_screen_size:
                 big_points_vs = self.max_radii2D > max_screen_size
                 big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
                 prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
+            if prune_sample_fraction < 1.0:
+                # Random-subset prune: only a random fraction of the eligible
+                # candidates is removed per event so a mass low-opacity cohort
+                # (e.g. pushed down together by a sparsity loss) drains
+                # gradually instead of vanishing from the feature map at once.
+                # fraction <= 0 disables opacity/size pruning entirely.
+                sample_mask = torch.rand(prune_mask.shape[0], device=prune_mask.device) < prune_sample_fraction
+                prune_mask = torch.logical_and(prune_mask, sample_mask)
         else:
             prune_mask = torch.zeros_like(self.get_opacity.squeeze(), dtype=torch.bool)
         deferred_prune_filter = merge_prune_filters(deferred_prune_filter)

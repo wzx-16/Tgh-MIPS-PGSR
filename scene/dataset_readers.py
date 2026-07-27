@@ -365,11 +365,13 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
                         fl_x=fl_x, fl_y=fl_y, cx=cx, cy=cy)
             
         elif 'fl_x' in contents and 'fl_y' in contents and 'cx' in contents and 'cy' in contents:
-            FovX = FovY = -1.0
+            #FovX = FovY = -1.0
             fl_x = contents['fl_x']
             fl_y = contents['fl_y']
             cx = contents['cx']
             cy = contents['cy']
+            FovX = focal2fov(fl_x, width)
+            FovY = focal2fov(fl_y, height)
             return CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=depth,
                         image_path=image_path, image_name=image_name, width=width, height=height, timestamp=timestamp,
                         fl_x=fl_x, fl_y=fl_y, cx=cx, cy=cy)
