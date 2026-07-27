@@ -800,6 +800,27 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     local_opacity_loss_from_iter = int(getattr(opt, "local_opacity_loss_from_iter", 15_000))
     local_opacity_loss_until_iter = int(getattr(opt, "local_opacity_loss_until_iter", -1))
     local_opacity_loss_weight = float(getattr(opt, "local_opacity_loss_weight", 0.01))
+    # local light_mlp_2 OUTPUT penalty: charges the actual local light usage
+    # (sum_exp: additive local radiance exp(mlp_output); exp_sum: |mlp_output|,
+    # deviation from the neutral multiplier) at the selected shading pixels.
+    # Unlike the opacity loss it acts on the quantity that reaches the image,
+    # so "prefer global, use local only where it pays" is priced directly.
+    local_mlp_output_loss_weight = float(getattr(opt, "local_mlp_output_loss_weight", 0.0))
+    local_mlp_output_loss_from_iter = int(getattr(opt, "local_mlp_output_loss_from_iter", 0))
+    local_mlp_output_loss_until_iter = int(getattr(opt, "local_mlp_output_loss_until_iter", -1))
+    # local feature decay: L1 pull of the visible local gaussians' carried
+    # feature (get_specular) toward zero — gives the normalized local feature
+    # map an explicit "return to gray" force where the reflection gradient
+    # stops defending the feature
+    local_feature_loss_weight = float(getattr(opt, "local_feature_loss_weight", 0.0))
+    local_feature_loss_from_iter = int(getattr(opt, "local_feature_loss_from_iter", 0))
+    local_feature_loss_until_iter = int(getattr(opt, "local_feature_loss_until_iter", -1))
+    # local alpha completeness: pull the local pass's rendered alpha toward 1 at
+    # the inside-sphere shading pixels — partial local coverage yields mixed /
+    # unstable normalized feature directions
+    local_alpha_loss_weight = float(getattr(opt, "local_alpha_loss_weight", 0.0))
+    local_alpha_loss_from_iter = int(getattr(opt, "local_alpha_loss_from_iter", 0))
+    local_alpha_loss_until_iter = int(getattr(opt, "local_alpha_loss_until_iter", -1))
     # local prune: much lower opacity bar than the global 0.05 and only a random
     # fraction of the eligible candidates per event, so mass low-opacity cohorts
     # (sparsity loss) leave the local feature map gradually, not all at once
@@ -1077,6 +1098,19 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     torchvision.utils.save_image((rendered_delta_normal + 1) / 2, f"rendered_delta_normal_{id}.png")
                 if iteration % (2 * debug_interval) == 0 and rendered_local_feature_map is not None:
                     torchvision.utils.save_image((rendered_local_feature_map[:3] + 1) / 2, f"rendered_local_feature_map_{id}.png")
+                if iteration % (2 * debug_interval) == 0 and render_pkg.get("local_light_usage") is not None:
+                    # local light_mlp_2 output at the shading pixels (sum_exp:
+                    # additive local radiance exp(mlp_output); exp_sum:
+                    # |mlp_output| from neutral), dumped beside the local
+                    # feature map on the same cadence; black = pixels outside
+                    # the shading mask or zero local light
+                    with torch.no_grad():
+                        _usage = render_pkg["local_light_usage"].detach().float()
+                        _usage_map = torch.zeros(viewpoint_cam.H * viewpoint_cam.W, 3, device=_usage.device)
+                        _usage_map[render_pkg["select_index"]] = _usage
+                        torchvision.utils.save_image(
+                            _usage_map.reshape(viewpoint_cam.H, viewpoint_cam.W, 3).permute(2, 0, 1).clamp(0.0, 1.0),
+                            f"local_mlp_output_{id}.png")
                 profiler.end("debug_io")
                 profiler.begin("loss_fwd")
                 #loss_start = time.time()
@@ -1461,6 +1495,32 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         local_opa = local_gaussians.get_opacity[local_visibility_filter] * local_mt[local_visibility_filter].detach()
                         loss += local_opacity_loss_weight * safe_mean(local_opa)
                         #loss += 0.001 * gaussians.get_opacity.mean()
+                    if (local_mlp_output_loss_weight > 0
+                            and iteration >= local_mlp_output_loss_from_iter
+                            and (local_mlp_output_loss_until_iter < 0 or iteration < local_mlp_output_loss_until_iter)):
+                        # price the local branch's output where it reaches the
+                        # image (None before lighting starts / no shading pixels)
+                        _local_usage = render_pkg.get("local_light_usage")
+                        if _local_usage is not None:
+                            loss += local_mlp_output_loss_weight * safe_mean(_local_usage)
+                    if (local_feature_loss_weight > 0
+                            and iteration >= local_feature_loss_from_iter
+                            and (local_feature_loss_until_iter < 0 or iteration < local_feature_loss_until_iter)):
+                        # decay the carried local feature (tanh-activated) of the
+                        # currently visible locals toward zero; features at other
+                        # timestamps are untouched, and the reflection gradient
+                        # must actively defend the ones that matter
+                        loss += local_feature_loss_weight * safe_mean(local_gaussians.get_specular[local_visibility_filter].abs())
+                    if (local_alpha_loss_weight > 0
+                            and iteration >= max(local_alpha_loss_from_iter, local_feature_start_iter)
+                            and (local_alpha_loss_until_iter < 0 or iteration < local_alpha_loss_until_iter)):
+                        # pull the local pass's accumulated alpha toward 1 at the
+                        # inside-sphere shading pixels (where the local feature
+                        # map is actually consumed); gated on the local spawn so
+                        # the pre-spawn all-zero alpha map is never penalized
+                        _local_alpha_map = render_pkg["rendered_local_alpha"]
+                        _in_mask = render_pkg["rendered_in"] > 0.05
+                        loss += local_alpha_loss_weight * safe_mean((1.0 - _local_alpha_map)[_in_mask])
                     density_loss = entropy_loss(opacity[visibility_filter])
                     # density_loss = entropy_loss(gaussians.get_opacity[visibility_filter])
                     if iteration > density_entropy_loss_from_iter:
@@ -1767,7 +1827,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # normalized local feature map never changes abruptly.
                         # fraction <= 0 disables opacity/size pruning entirely;
                         # split-parent cleanup always runs via the deferred filter.
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, local_thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=True, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor, prune_sample_fraction=local_prune_sample_fraction)
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, local_thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=False, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor, prune_sample_fraction=local_prune_sample_fraction)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         if iteration <= local_reset_opacity_high_until_iter:

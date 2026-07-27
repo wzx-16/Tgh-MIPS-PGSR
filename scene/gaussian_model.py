@@ -862,7 +862,14 @@ class GaussianModel:
                 nn.init.constant_(self.light_mlp_2[-1].bias, -5.0)
                 print("light_mlp_2 final layer zero-initialized (sum_exp: local light term starts ~0)")
             else:
-                print("light_mlp_2 final layer zero-initialized (local pathway starts neutral)")
+                # exp_sum: bias 0 = neutral multiplier exp(0)=1, so the local
+                # pathway is EXACTLY inactive at init: the |mlp_output| usage
+                # map/penalty starts at 0 and switching the branch on at
+                # local_feature_start_iter is seamless (exp(base+0)=exp(base)).
+                # The historical log(0.25) bias uniformly scaled the base light
+                # x0.25 and read as a constant 1.39 in the usage map.
+                nn.init.constant_(self.light_mlp_2[-1].bias, 0.0)
+                print("light_mlp_2 final layer zero-initialized (exp_sum: bias 0, neutral factor 1)")
 
         # self.light_mlp_2 = SpecLightMLP(
         #     base_dim=self.gsdim + self.sph_dim + 2,

@@ -39,7 +39,7 @@ batch_size: 1
 exhaust_test: True
 
 ModelParams:
-  sh_degree: 1
+  sh_degree: 0
   source_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/data/spec_floor2"
   model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/spec_floor2"
   images: "images"
@@ -62,11 +62,11 @@ PipelineParams:
   env_optimize_from: 0
   # selfcap floor scene: tight env sphere around the object area
   env_sphere_center: "0,1,3.5"
-  env_sphere_radius: 1.7
+  env_sphere_radius: 1.6
   # SH-DC-as-diffuse twin: inside-sphere base color = 0-degree SH (view-
   # independent DC) instead of learned albedo; single-variable vs the base run
   inside_diffuse_source: "sh_dc"
-  local_light_mlp_zero_init: False
+  local_light_mlp_zero_init: True
   local_light_mlp_detach_cos: False
   spec_light_combine: "exp_sum"
   eval_shfs_4d: True
@@ -123,7 +123,7 @@ OptimizationParams:
   densify_until_iter: 25_000
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
-  temporal_split_from_iter: 25_000
+  temporal_split_from_iter: 30_000
   temporal_split_until_iter: 30_000
   densify_specular_time_threshold: 0.00001
   opacity_zero_reset_iter: -1          # one-time reset disabled (was 0.5 mid-run)
@@ -140,18 +140,26 @@ OptimizationParams:
   local_feature_start_iter: 7_000
   reset_opacity_high_until_iter: 12_500
   densify_interval_schedule: "9000:100,-1:200"   # 100 until 9k, then 200
-  global_opacity_loss_until_iter: 15_000
+  global_opacity_loss_until_iter: 25_000
   # local sparsity loss delayed to 15k (NOT the x0.5-scaled 7.5k): with loss from
   # 7.5k + 0.05 opacity pruning, the local branch died within 4k iters of its 6k
   # spawn (exp130: 725 local pts left at 10k, empty local feature map).  The
   # user's earlier spec_floor2 runs kept locals alive with loss from 15k of 30k;
   # spawn at 6k + loss at 15k gives a 9k loss-free runway.
+  local_alpha_loss_weight: 0.0
+  local_alpha_loss_from_iter: 7000
+  local_alpha_loss_until_iter: 20000
+  local_mlp_output_loss_weight: 0.01
+  local_mlp_output_loss_from_iter: 10_000
+  local_mlp_output_loss_until_iter: 20000
   local_opacity_loss_from_iter: 12_000
-  local_opacity_loss_weight: 0.005
+  local_opacity_loss_weight: 0.0
+  local_feature_loss_weight: 0.0
+  local_feature_loss_from_iter: 10_000
   local_reset_opacity_high_until_iter: -1
   density_entropy_loss_from_iter: 1_500
   # monocular priors cut early: depth to 5k, normal to 9k
-  mono_depth_loss_until_iter: 30_000
+  mono_depth_loss_until_iter: 5_000
   mono_normal_loss_until_iter: 30_000
   opacity_periodic_reset_interval: -1
   opacity_periodic_reset_value: 0.5
@@ -172,11 +180,11 @@ OptimizationParams:
   local_branch_lazy_init: True
   densify_until_num_points: -1
   final_prune_from_iter: -1
-  sh_increase_interval: 20_000
+  sh_increase_interval: 40_000
   lambda_opa_mask: 0.0
   lambda_rigid: 0.0
   lambda_motion: 0.0
-  cam_affine_enable: False
+  cam_affine_enable: True
   cam_affine_lr: 0.001
   cam_affine_from_iter: 1000
   cam_affine_ssim_gate: 0.5

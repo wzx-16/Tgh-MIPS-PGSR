@@ -222,6 +222,26 @@ class OptimizationParams(ParamGroup):
         self.local_opacity_loss_from_iter = 15_000
         self.local_opacity_loss_until_iter = -1
         self.local_opacity_loss_weight = 0.01
+        # local light_mlp_2 output penalty ("pay for local light usage"): acts on
+        # the branch output that reaches the image instead of point opacities.
+        # sum_exp: mean additive local radiance; exp_sum: mean |mlp_output|.
+        # 0 = off (historical behavior).
+        self.local_mlp_output_loss_weight = 0.0
+        self.local_mlp_output_loss_from_iter = 0
+        self.local_mlp_output_loss_until_iter = -1
+        # local feature decay: L1 pull of the visible locals' carried feature
+        # (get_specular) toward zero; the normalized local feature map returns
+        # to gray wherever the reflection gradient stops defending the feature.
+        # 0 = off (historical behavior).
+        self.local_feature_loss_weight = 0.0
+        self.local_feature_loss_from_iter = 0
+        self.local_feature_loss_until_iter = -1
+        # local alpha completeness: pull the local pass's rendered alpha toward
+        # 1 at the inside-sphere shading pixels (partial coverage = mixed /
+        # unstable normalized feature directions). 0 = off.
+        self.local_alpha_loss_weight = 0.0
+        self.local_alpha_loss_from_iter = 0
+        self.local_alpha_loss_until_iter = -1
         # gaussian-mode local init: <= 0 (default) = per-gaussian match to the
         # flat-window >0.05 effect range at clone time (statics stay wide,
         # dynamics stay narrow); > 0 = uniform range of N frames (full width)

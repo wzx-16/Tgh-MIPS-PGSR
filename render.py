@@ -12,6 +12,7 @@
 import torch
 from scene import Scene, TemperalGaussianHierarchy
 import os
+import sys
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render, render_3d_pgsr_anti
@@ -32,6 +33,60 @@ def _clone_tensor_attr(src_tensor):
     if isinstance(src_tensor, torch.nn.Parameter):
         return torch.nn.Parameter(cloned.requires_grad_(True))
     return cloned
+
+
+def _explicit_cli_dests(parser):
+    """Set of argparse dests explicitly present on the command line."""
+    tokens = set()
+    for tok in sys.argv[1:]:
+        if tok.startswith("-"):
+            tokens.add(tok.split("=")[0])
+    dests = set()
+    for action in parser._actions:
+        if any(opt in tokens for opt in action.option_strings):
+            dests.add(action.dest)
+    return dests
+
+
+def _apply_render_config(args, parser):
+    """Merge a training yaml (or an effective_config_*.yaml dump) onto args.
+
+    Priority: explicit CLI flags > config yaml > cfg_args > argparse defaults.
+    Keys unknown to the render parser (train-only knobs) are collected onto
+    args.extra_cfg instead of being dropped, so callers can consume e.g.
+    local_feature_start_iter.
+    """
+    args.extra_cfg = {}
+    if not getattr(args, "config", None):
+        return args
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.to_container(OmegaConf.load(args.config), resolve=True)
+    if isinstance(cfg.get("args"), dict) and "run_id" in cfg:
+        cfg = cfg["args"]  # effective_config_*.yaml dump: values live under args:
+    flat = {}
+    def _walk(d):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                _walk(v)  # ModelParams:/PipelineParams:/OptimizationParams: sections
+            else:
+                flat[k] = v
+    _walk(cfg)
+    explicit = _explicit_cli_dests(parser)
+    applied, kept_cli = [], []
+    for k, v in flat.items():
+        if k in ("config",):
+            continue
+        if k in explicit:
+            kept_cli.append(k)
+        elif hasattr(args, k):
+            setattr(args, k, v)
+            applied.append(k)
+        else:
+            args.extra_cfg[k] = v
+    print(f"Applied {len(applied)} params from config {args.config}")
+    if kept_cli:
+        print("Kept explicit CLI overrides:", sorted(kept_cli))
+    return args
 
 
 def _infer_checkpoint_id(loaded_pth):
@@ -179,6 +234,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     delta_normal_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_delta_normal")
     diffuse_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_diffuse")
     local_feature_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_local_feature")
+    local_usage_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_local_usage")
     # depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
     # pipe = pp("depth-estimation", model=depth_guidance_checkpoint, device="cuda")
     # pipe.model.eval()
@@ -197,6 +253,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     makedirs(delta_normal_path, exist_ok=True)
     makedirs(diffuse_path, exist_ok=True)
     makedirs(local_feature_path, exist_ok=True)
+    makedirs(local_usage_path, exist_ok=True)
     timestamp_first = 0
     # cnts = []
     # roots = []
@@ -302,7 +359,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         dir_pp = (xyz - viewpoint_cam.camera_center.repeat(gaussians.get_features.shape[0], 1)).detach()
         dir_pp_normalized = dir_pp/dir_pp.norm(dim=1, keepdim=True)
         render_package = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree,
-                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=render_iteration, timestamp=timestamp, local_feature_start_iter=12000)
+                    gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, local_mask=local_ma, max_sh_channels=gaussians.max_sh_degree, normal=normal, reflect=reflvec, dir_pp=dir_pp_normalized, pc=gaussians, local_pc=local_gaussians, iteration=render_iteration, timestamp=timestamp, local_feature_start_iter=int(getattr(pipeline, "local_feature_start_iter", 12000)))
         #rendering = render_3d_pgsr_anti(viewpoint_cam, xyz, None, opacity, gaussians.active_sh_degree, 
         #                           gaussians.get_scaling, gaussians.get_rotation, background, shs=shs, mask=ma, max_sh_channels=gaussians.max_sh_degree)["render"]
         rendering = render_package["render"]
@@ -344,6 +401,12 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         torchvision.utils.save_image(render_output, os.path.join(render_path, output_stem + ".png"))
         if skip_save is not None and skip_save:
             continue
+        _usage = render_package["local_light_usage"].detach().float()
+        _usage_map = torch.zeros(viewpoint_cam.H * viewpoint_cam.W, 3, device=_usage.device)
+        _usage_map[render_package["select_index"]] = _usage
+        torchvision.utils.save_image(
+            _usage_map.reshape(viewpoint_cam.H, viewpoint_cam.W, 3).permute(2, 0, 1).clamp(0.0, 1.0),
+            os.path.join(local_usage_path, output_stem + ".png"))
         #cv2.imwrite("./debug_render_{}.jpg".format(viewpoint_cam.image_name), ((rendering.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8)))
         torchvision.utils.save_image(gt, os.path.join(gts_path, output_stem + ".png"))
         torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, output_stem + ".png"))
@@ -438,6 +501,8 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Testing script parameters")
     model = ModelParams(parser, sentinel=True)
     pipeline = PipelineParams(parser)
+    parser.add_argument("--config", default="", type=str,
+                        help="Training yaml or effective_config_*.yaml; its values override cfg_args/defaults, explicit CLI flags override it.")
     parser.add_argument("--iteration", default=-1, type=int)
     parser.add_argument("--skip_train", action="store_true")
     parser.add_argument("--skip_test", action="store_true")
@@ -448,10 +513,15 @@ if __name__ == "__main__":
     parser.add_argument("--zero_local_gaussians", action="store_true", help="Ignore any saved local checkpoint and render with zero-initialized local Gaussians.")
     parser.add_argument("--append_gt", action="store_true", help="Append the ground-truth image to the right of each rendered image.")
     args = get_combined_args(parser)
+    args = _apply_render_config(args, parser)
     print("Rendering " + args.model_path)
 
     # Initialize system state (RNG)
     safe_state(args.quiet)
     id = _infer_checkpoint_id(args.loaded_pth)
     print("Rendering id:", id)
-    render_sets(model.extract(args), args.iteration, pipeline.extract(args), args.skip_train, args.skip_test, args.skip_save, id, args.render_suffix, args.render_frames, args.zero_local_gaussians, args.append_gt)
+    pipeline_args = pipeline.extract(args)
+    # train-only keys render still consumes (not part of PipelineParams)
+    if "local_feature_start_iter" in args.extra_cfg:
+        pipeline_args.local_feature_start_iter = int(args.extra_cfg["local_feature_start_iter"])
+    render_sets(model.extract(args), args.iteration, pipeline_args, args.skip_train, args.skip_test, args.skip_save, id, args.render_suffix, args.render_frames, args.zero_local_gaussians, args.append_gt)

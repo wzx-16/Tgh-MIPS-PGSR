@@ -910,6 +910,7 @@ def render_3d_pgsr_anti(
     spec_rgb_local = None
     mlp_debug_maps = None
     mix_weight_map = None
+    local_light_usage = None
     with torch.no_grad():
         select_mask = rendered_in.reshape(-1,) > 0.05
         #select_mask = torch.logical_or(select_mask, rendered_local_alpha.reshape(-1,) > 0.02)
@@ -1068,19 +1069,42 @@ def render_3d_pgsr_anti(
             #     pc.light_mlp,
             #     input_mlp_base,
             # )
-            mlp_output = pc.light_mlp_2(input_mlp).float()
             mlp_output_base = pc.light_mlp(input_mlp_base).float()
+            if iteration >= local_feature_start_iter:
+                mlp_output = pc.light_mlp_2(input_mlp).float()
+            else:
+                # local branch gated off until local_feature_start_iter: its
+                # features are not rendered yet (local pass inactive), so its
+                # output (then driven only by env dir / roughness / cos inputs)
+                # must not leak into the image either.  Zeros = neutral for the
+                # exp_sum combine; the sum_exp additive term is skipped below.
+                mlp_output = torch.zeros_like(mlp_output_base)
         else:
             mlp_output = pc.light_mlp_2(base_input_mlp, sph_outer_feature).float()
             mlp_output_base = torch.zeros_like(mlp_output)
         mlp_output_sum = mlp_output + mlp_output_base
+        local_branch_active = iteration >= local_feature_start_iter or not isinstance(pc.light_mlp_2, torch.nn.Sequential)
         if getattr(pc, "spec_light_combine", "exp_sum") == "sum_exp":
             # two additive positive light terms: global-feature light + local-
             # feature light; with zero-init the local term starts at ~exp(-5)=0
-            spec_light = (torch.exp(torch.clamp(mlp_output_base, max=5.0))
-                          + torch.exp(torch.clamp(mlp_output, max=5.0)))
+            spec_light = torch.exp(torch.clamp(mlp_output_base, max=5.0))
+            if local_branch_active:
+                spec_light = spec_light + torch.exp(torch.clamp(mlp_output, max=5.0))
+                # local-usage penalty target: the ACTUAL additive local radiance —
+                # "local light is expensive, use it only where it buys photometric
+                # error" acts on the branch output instead of point opacities
+                local_light_usage = torch.exp(torch.clamp(mlp_output, max=5.0))
         else:
             spec_light = torch.exp(torch.clamp(mlp_output_sum, max=5.0))
+            if local_branch_active:
+                # exp_sum: local branch shifts the base by mlp_output in log space;
+                # |mlp_output| = deviation from the neutral factor 1.  NOTE: the
+                # final-layer bias initializes to log(0.25) ~= -1.39, so the map /
+                # penalty start at ~1.39 uniformly and decay as the base absorbs
+                # the constant (observed in exp204: concentrates onto the mirror
+                # reflections).  A mean-subtracted variant was tried and reverted —
+                # it no longer showed the actual local light.
+                local_light_usage = mlp_output.abs()
         #spec_light = torch.exp(torch.clamp(mlp_output, max=5.0))
 
         spec_rgb = torch.zeros(viewpoint_camera.H, viewpoint_camera.W, 3, device="cuda")
@@ -1155,6 +1179,8 @@ def render_3d_pgsr_anti(
                     "mlp_debug": mlp_debug_maps,
                     "spec_rgb_global": spec_rgb_global,
                     "spec_rgb_local": spec_rgb_local,
+                    "local_light_usage": local_light_usage,
+                    "select_index": select_index,
                     "mix_weight": mix_weight_map,
                     "rendered_in": rendered_in.permute(2, 0, 1),
                     "rendered_local_alpha": rendered_local_alpha.permute(2, 0, 1),
