@@ -5,7 +5,7 @@
 # exp72: clean static-sph baseline. ONLY change vs abuzabi.yaml: sliding sph disabled
 # (module 5, measured net loss across exp63-71). exp62 confounds deliberately kept.
 gaussian_dim: 4
-time_duration: [0.0, 10.0]
+time_duration: [0.0, 2.0]
 num_pts: 1000_000
 num_pts_ratio: 1.0
 rot_4d: True
@@ -15,8 +15,8 @@ exhaust_test: True
 
 ModelParams:
   sh_degree: 1
-  source_path: "/root/autodl-tmp/projects/Tgh-MIPS-PGSR/data/N3V/abuzabi"
-  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/abuzabi"
+  source_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/data/abuzabi_2"
+  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/abuzabi_2"
   images: "images"
   resolution: 1
   white_background: False
@@ -61,7 +61,7 @@ PipelineParams:
 
 OptimizationParams:
   iterations: 60_000
-  batch_size_schedule: "50000:2"
+  batch_size_schedule: "55000:2"
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032
@@ -103,18 +103,18 @@ OptimizationParams:
   # --- scene time model: 100 frames @30fps, t in [0, 3.3] ---
   # init from exactly the 60-frame window (frames 20-79); the historical
   # record recipe left this at -1 (load all 100 pcds, clamps pull outliers)
-  pcd_init_frame_start: 20
-  pcd_init_frame_end: 79
+  pcd_init_frame_start: 0
+  pcd_init_frame_end: 60
   temporal_fps: 30.0
-  temporal_clip_t_min: 0.6666666666666666
-  temporal_clip_t_max: 2.6333333333333333
-  temporal_cap_frames: 32.0      # 60 frames: num_frames/2 + 2 (exp78/111 record value); static init needs 30f
+  temporal_clip_t_min: 0.0
+  temporal_clip_t_max: 2.0
+  temporal_cap_frames: 32.5      # 60 frames: num_frames/2 + 2 (exp78/111 record value); static init needs 30f
   # --- phase starts scaled x7/6 from the 60k base ---
   inside_diffuse_source: "albedo"
   spec_light_combine: "exp_sum"
   local_light_mlp_zero_init: True
   local_mlp_output_loss_weight: 0.05
-  local_mlp_output_loss_from_iter: 12_000
+  local_mlp_output_loss_from_iter: 15_000
   local_opacity_loss_weight: 0.0
   lighting_start_iter: 9_000
   local_feature_start_iter: 12_000

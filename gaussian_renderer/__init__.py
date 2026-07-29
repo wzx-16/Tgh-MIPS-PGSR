@@ -1058,6 +1058,25 @@ def render_3d_pgsr_anti(
                 _, sliding_weights = pc.dir_encoding.get_sliding_slot_weights(timestamp)
                 sliding_w = spec_feat.new_tensor(sliding_weights).expand(spec_feat.shape[0], sliding_slots)
                 input_mlp_pieces += [spec_feat_sliding, sliding_outer, sliding_w]
+            if getattr(pc, "light_mlp_fresnel_input", False) or getattr(pc, "light_mlp_cos_input", False):
+                # optionally detach the angular input columns so they inform
+                # the MLP without a gradient path back into the normals (the
+                # Schlick basis gradient -5(1-cos)^4 blows up at grazing
+                # angles, letting the MLP bend silhouette/floor normals to
+                # modulate brightness).  Forward-identical, resume-safe.
+                _global_cos = cos_nr.detach() if getattr(pc, "light_mlp_detach_cos", False) else cos_nr
+            if getattr(pc, "light_mlp_fresnel_input", False):
+                # Schlick Fresnel basis (1 - cos)^5 for grazing-angle falloff.
+                # cos clamped to [0, 1]: the blended pixel normal can go
+                # slightly backfacing at silhouettes and unclamped the feature
+                # would spike to 2^5.  Append order for the zero-init
+                # checkpoint-widening layout: [static, parity, sliding,
+                # fresnel, cos].
+                input_mlp_pieces.append((1.0 - _global_cos.clamp(min=0.0)) ** 5)
+            if getattr(pc, "light_mlp_cos_input", False):
+                # raw cos(n, r) = n.v column (already clamped to [-1, 1]):
+                # smooth full-range angular input, Ref-NeRF style.
+                input_mlp_pieces.append(_global_cos)
             input_mlp_base = torch.cat(input_mlp_pieces, dim=-1)
             # input_mlp = torch.cat(
             #     [spec_feat, sph_outer_feature, (local_feature_selected.reshape(-1, pc.gsdim, 1) @ global_feature_selected.reshape(-1, 1, pc.gsdim)).reshape(-1, pc.gsdim * pc.gsdim), roughness_selected, cos_nr],

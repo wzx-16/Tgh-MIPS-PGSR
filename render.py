@@ -72,13 +72,17 @@ def _apply_render_config(args, parser):
                 flat[k] = v
     _walk(cfg)
     explicit = _explicit_cli_dests(parser)
+    # sentinel=True parser defaults are None, and get_combined_args drops
+    # None-valued keys when cfg_args is missing — so known parser dests may be
+    # absent from args entirely; apply yaml values for those too.
+    known_dests = {a.dest for a in parser._actions}
     applied, kept_cli = [], []
     for k, v in flat.items():
         if k in ("config",):
             continue
         if k in explicit:
             kept_cli.append(k)
-        elif hasattr(args, k):
+        elif hasattr(args, k) or k in known_dests:
             setattr(args, k, v)
             applied.append(k)
         else:
@@ -401,12 +405,13 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         torchvision.utils.save_image(render_output, os.path.join(render_path, output_stem + ".png"))
         if skip_save is not None and skip_save:
             continue
-        _usage = render_package["local_light_usage"].detach().float()
-        _usage_map = torch.zeros(viewpoint_cam.H * viewpoint_cam.W, 3, device=_usage.device)
-        _usage_map[render_package["select_index"]] = _usage
-        torchvision.utils.save_image(
-            _usage_map.reshape(viewpoint_cam.H, viewpoint_cam.W, 3).permute(2, 0, 1).clamp(0.0, 1.0),
-            os.path.join(local_usage_path, output_stem + ".png"))
+        if render_package["local_light_usage"] is not None:
+            _usage = render_package["local_light_usage"].detach().float()
+            _usage_map = torch.zeros(viewpoint_cam.H * viewpoint_cam.W, 3, device=_usage.device)
+            _usage_map[render_package["select_index"]] = _usage
+            torchvision.utils.save_image(
+                _usage_map.reshape(viewpoint_cam.H, viewpoint_cam.W, 3).permute(2, 0, 1).clamp(0.0, 1.0),
+                os.path.join(local_usage_path, output_stem + ".png"))
         #cv2.imwrite("./debug_render_{}.jpg".format(viewpoint_cam.image_name), ((rendering.clip(min=0, max=1).squeeze().permute(1,2,0).detach().cpu().numpy()[..., [2,1,0]] * 255).astype(np.uint8)))
         torchvision.utils.save_image(gt, os.path.join(gts_path, output_stem + ".png"))
         torchvision.utils.save_image(rendered_normal, os.path.join(rendered_normal_path, output_stem + ".png"))
@@ -449,6 +454,9 @@ def render_sets(dataset : ModelParams, iteration : int, pipeline : PipelineParam
             _m.spec_light_combine = str(getattr(pipeline, "spec_light_combine", "exp_sum"))
             _m.local_light_mlp_geo_inputs = bool(getattr(pipeline, "local_light_mlp_geo_inputs", True))
             _m.local_light_mlp_detach_cos = bool(getattr(pipeline, "local_light_mlp_detach_cos", False))
+            _m.light_mlp_fresnel_input = bool(getattr(pipeline, "light_mlp_fresnel_input", False))
+            _m.light_mlp_cos_input = bool(getattr(pipeline, "light_mlp_cos_input", False))
+            _m.light_mlp_detach_cos = bool(getattr(pipeline, "light_mlp_detach_cos", False))
         gaussians.temporal_opacity_mode = pipeline.temporal_opacity_mode
         gaussians.temporal_flat_radius_mult = pipeline.temporal_flat_radius_mult
         gaussians.temporal_flat_edge_sigma_mult = pipeline.temporal_flat_edge_sigma_mult

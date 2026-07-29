@@ -699,6 +699,9 @@ class GaussianModel:
         self.sph_parity_bands = ""
         self.sph_sliding_bands = ""
         self.sph_sliding_window = 16
+        self.light_mlp_fresnel_input = False
+        self.light_mlp_cos_input = False
+        self.light_mlp_detach_cos = False
         # self.dir_encoding = SphMipEncoding(n_levels, plane_size, self.sph_dim, 1, self.dim, False).cuda()
         # self.light_mlp = nn.Sequential(
         #     nn.Linear(self.sph_dim * 4 + self.sph_dim, run_dim),
@@ -743,6 +746,14 @@ class GaussianModel:
             # [..., alpha_s * s_0..s_{W-1}, f (x) (alpha_s * s_0..s_{W-1}), alpha_0..alpha_{W-1}]
             sliding_dim = sliding_slots * self.dir_encoding.sliding_channels
             light_mlp_in_dim += sliding_dim + sliding_dim * self.gsdim + sliding_slots
+        if getattr(self, "light_mlp_fresnel_input", False):
+            # Schlick Fresnel basis (1 - clamp(cos_nr, 0, 1))^5: one column
+            # (append-order layout [static, parity, sliding, fresnel, cos] so
+            # zero-init widening of older checkpoints stays function-preserving)
+            light_mlp_in_dim += 1
+        if getattr(self, "light_mlp_cos_input", False):
+            # raw cos_nr column (n.v angular input)
+            light_mlp_in_dim += 1
         self.light_mlp = nn.Sequential(
             nn.Linear(light_mlp_in_dim, run_dim),
             nn.ReLU(inplace=True),
@@ -882,15 +893,18 @@ class GaussianModel:
 
     def ensure_parity_light_env(self):
         """Idempotent setup/upgrade of the dynamic sph keyframe modes (parity
-        slots and/or sliding window): creates the keyframe stacks on
-        dir_encoding and widens light_mlp's first linear layer with zero-init
-        columns for the new inputs (function-preserving for modules unpickled
-        from older checkpoints, provided new input blocks are enabled in append
-        order [parity, sliding]).  Must run before training_setup so the new
-        params join the optimizer."""
+        slots and/or sliding window) and the Fresnel / cos input columns:
+        creates the keyframe stacks on dir_encoding and widens light_mlp's
+        first linear layer with zero-init columns for the new inputs
+        (function-preserving for modules unpickled from older checkpoints,
+        provided new input blocks are enabled in append order [parity, sliding,
+        fresnel, cos]).  Must run before training_setup so the new params join
+        the optimizer."""
         parity_bands = getattr(self, "sph_parity_bands", "")
         sliding_bands = getattr(self, "sph_sliding_bands", "")
-        if (not parity_bands and not sliding_bands) or self.dir_encoding is None or self.light_mlp is None:
+        fresnel_input = bool(getattr(self, "light_mlp_fresnel_input", False))
+        cos_input = bool(getattr(self, "light_mlp_cos_input", False))
+        if (not parity_bands and not sliding_bands and not fresnel_input and not cos_input) or self.dir_encoding is None or self.light_mlp is None:
             return
         if parity_bands:
             self.dir_encoding.ensure_parity_keyframes(
@@ -909,12 +923,26 @@ class GaussianModel:
             return
         parity_channels = self.dir_encoding.parity_channels
         sliding_slots = self.dir_encoding.sliding_slots
+        # Cumulative widths of the append-order layout [static, parity,
+        # sliding, fresnel, cos]; zero-init widening is function-preserving
+        # from any enabled-block prefix width.
         expected_in = self.sph_dim * self.gsdim + self.sph_dim
+        prefix_widths = [expected_in]
         if parity_channels > 0:
             expected_in += 2 * parity_channels * self.gsdim + 2
-        sliding_dim = sliding_slots * self.dir_encoding.sliding_channels if sliding_slots > 0 else 0
+            prefix_widths.append(expected_in)
         if sliding_slots > 0:
+            sliding_dim = sliding_slots * self.dir_encoding.sliding_channels
             expected_in += sliding_dim + sliding_dim * self.gsdim + sliding_slots
+            prefix_widths.append(expected_in)
+        if fresnel_input:
+            # single Schlick basis column (1 - clamp(cos_nr, 0, 1))^5
+            expected_in += 1
+            prefix_widths.append(expected_in)
+        if cos_input:
+            # single raw cos_nr column
+            expected_in += 1
+            prefix_widths.append(expected_in)
         first = self.light_mlp[0]
         if first.in_features == expected_in:
             return
@@ -922,12 +950,11 @@ class GaussianModel:
             raise ValueError(f"[GaussianModel] light_mlp input {first.in_features} exceeds expected {expected_in}; "
                              f"checkpoint was trained with a larger dynamic sph spec.")
         # Zero-init widening is only function-preserving from a prefix of the
-        # current layout: static-only, or static+parity when sliding is newly
-        # added.  Any other width (legacy raw-concat sliding, a different
-        # window/channel spec) would have its columns silently reinterpreted.
-        valid_prefixes = {self.sph_dim * self.gsdim + self.sph_dim}
-        if parity_channels > 0:
-            valid_prefixes.add(self.sph_dim * self.gsdim + self.sph_dim + 2 * parity_channels * self.gsdim + 2)
+        # current layout (e.g. static-only, or static+parity when sliding /
+        # fresnel are newly added).  Any other width (legacy raw-concat
+        # sliding, a different window/channel spec) would have its columns
+        # silently reinterpreted.
+        valid_prefixes = set(prefix_widths[:-1])
         if first.in_features not in valid_prefixes:
             raise ValueError(f"[GaussianModel] light_mlp input {first.in_features} matches neither the current "
                              f"layout ({expected_in}) nor a function-preserving prefix ({sorted(valid_prefixes)}); "

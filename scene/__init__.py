@@ -57,6 +57,7 @@ class Scene:
         self.gaussians = gaussians
         self.local_gaussians = local_gaussians
         self.local_gaussians_loaded = False
+        self.local_gaussians_checkpoint_payload = None
         self.loaded_gaussian_checkpoint = False
         self.loaded_tgh_checkpoint = False
         self.tgh = tgh
@@ -193,6 +194,11 @@ class Scene:
                         try:
                             local_model_args, _ = torch.load(local_ckpt_path, map_location=local_map_location, weights_only=False)
                             self.local_gaussians.restore(local_model_args, training_args=None)
+                            # Keep the payload only until train.py can rebuild the
+                            # optimizer with the current config and restore its
+                            # saved Adam moments.  Holding it here avoids loading
+                            # this multi-GB sidecar a second time.
+                            self.local_gaussians_checkpoint_payload = local_model_args
                             self.local_gaussians_loaded = True
                             print(f"Loaded local Gaussians from {local_ckpt_path}")
                             break

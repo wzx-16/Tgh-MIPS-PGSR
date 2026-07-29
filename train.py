@@ -479,6 +479,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         _m.spec_light_combine = str(getattr(pipe, "spec_light_combine", "exp_sum"))
         _m.local_light_mlp_geo_inputs = bool(getattr(pipe, "local_light_mlp_geo_inputs", True))
         _m.local_light_mlp_detach_cos = bool(getattr(pipe, "local_light_mlp_detach_cos", False))
+        _m.light_mlp_fresnel_input = bool(getattr(pipe, "light_mlp_fresnel_input", False))
+        _m.light_mlp_cos_input = bool(getattr(pipe, "light_mlp_cos_input", False))
+        _m.light_mlp_detach_cos = bool(getattr(pipe, "light_mlp_detach_cos", False))
         _m.pcd_init_frame_start = int(getattr(opt, "pcd_init_frame_start", -1))
         _m.pcd_init_frame_end = int(getattr(opt, "pcd_init_frame_end", -1))
     if getattr(pipe, "sph_time_min", -1.0) >= 0:
@@ -498,6 +501,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         print(f"Sph sliding-window dynamic keyframes: {gaussians.sph_sliding_bands}, "
               f"{gaussians.sph_sliding_window} slots over "
               f"[{gaussians.sph_time_min:.4f}, {gaussians.sph_time_max:.4f}] (tent-weighted slot samples + outer products + alphas into light_mlp)")
+    if gaussians.light_mlp_fresnel_input:
+        print("Global light_mlp Fresnel input enabled: (1 - clamp(cos_nr, 0, 1))^5 column appended")
+    if gaussians.light_mlp_cos_input:
+        print("Global light_mlp cos input enabled: raw cos_nr column appended")
+    if getattr(gaussians, "light_mlp_detach_cos", False) and (gaussians.light_mlp_fresnel_input or gaussians.light_mlp_cos_input):
+        print("Global light_mlp fresnel/cos input columns DETACHED: no gradient into normals through these columns")
     gaussians.init_light_env()
     scene = Scene(dataset, gaussians, tgh, local_gaussians=local_gaussians, num_pts=num_pts, num_pts_ratio=num_pts_ratio, time_duration=time_duration)
     if gaussians.sph_residual_keyframes > 0 and gaussians.dir_encoding is not None:
@@ -518,10 +527,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             time_max=gaussians.sph_time_max,
             start_iteration=gaussians.sph_residual_from_iter,
         )
-    if (gaussians.sph_parity_bands or gaussians.sph_sliding_bands) and gaussians.dir_encoding is not None:
-        # Same upgrade path for parity-slot / sliding-window dynamic keyframes;
-        # also widens the light MLP input with zero-init columns when upgrading
-        # old checkpoints.
+    if (gaussians.sph_parity_bands or gaussians.sph_sliding_bands
+            or getattr(gaussians, "light_mlp_fresnel_input", False)
+            or getattr(gaussians, "light_mlp_cos_input", False)) and gaussians.dir_encoding is not None:
+        # Same upgrade path for parity-slot / sliding-window dynamic keyframes
+        # and the Fresnel / cos input columns; also widens the light MLP input
+        # with zero-init columns when upgrading old checkpoints.
         gaussians.ensure_parity_light_env()
     opacity_zero_reset_iter = getattr(opt, "opacity_zero_reset_iter", -1)
     opacity_zero_reset_value = getattr(opt, "opacity_zero_reset_value", 1.0e-6)
@@ -577,8 +588,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         elif not getattr(scene, "local_gaussians_loaded", False):
             initialize_local_gaussian_model(gaussians, local_gaussians, opt, empty=local_branch_lazy_init)
         else:
-            setup_restored_local_gaussian_model(local_gaussians, opt)
-            print("Using restored local Gaussian checkpoint.")
+            local_checkpoint_payload = getattr(scene, "local_gaussians_checkpoint_payload", None)
+            if local_checkpoint_payload is not None:
+                if (local_gaussians.brdf_mlp is None
+                        or local_gaussians.light_mlp is None
+                        or local_gaussians.light_mlp_2 is None
+                        or local_gaussians.dir_encoding is None):
+                    local_gaussians.init_light_env()
+                local_gaussians.restore(local_checkpoint_payload, opt)
+                scene.local_gaussians_checkpoint_payload = None
+                print(f"Using restored local Gaussian checkpoint with "
+                      f"{len(local_gaussians.optimizer.state)} Adam parameter states.")
+                del local_checkpoint_payload
+            else:
+                setup_restored_local_gaussian_model(local_gaussians, opt)
+                print("Using restored local Gaussian checkpoint with fresh optimizer "
+                      "(checkpoint optimizer payload unavailable).")
         # The checkpoint payload aliases the live CUDA param/Adam tensors; keeping
         # it referenced for the rest of training() pins the entire resume-time
         # generation on the GPU once the first densify/split retires those tensors.
@@ -609,8 +634,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     for lambda_name in lambda_all:
         vars()[f"ema_{lambda_name.replace('lambda_','')}_for_log"] = 0.0
     
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
-    first_iter += 1
+    replay_checkpoint_iteration = bool(
+        checkpoint and getattr(opt, "resume_replay_checkpoint_iteration", False)
+    )
+    first_scheduled_iteration = first_iter if replay_checkpoint_iteration else first_iter + 1
+    if checkpoint:
+        print(f"Resume iteration policy: checkpoint {first_iter}, "
+              f"first scheduled iteration {first_scheduled_iteration}"
+              f"{' (replaying pending pre-step checkpoint iteration)' if replay_checkpoint_iteration else ''}")
+    progress_bar = tqdm(
+        range(first_scheduled_iteration, opt.iterations + 1),
+        desc="Training progress",
+    )
         
     # if pipe.env_map_res:
     #     env_map = nn.Parameter(torch.zeros((3,pipe.env_map_res, pipe.env_map_res),dtype=torch.float, device="cuda").requires_grad_(True))
@@ -711,7 +746,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         prefetch_factor=4 if train_num_workers > 0 else None,
     )
     #print("test6")
-    iteration = first_iter
+    # The loop increments before executing an iteration.  Fresh runs therefore
+    # start from 0; normal resumes start at checkpoint+1.  A replay resume starts
+    # one label earlier because our checkpoints are saved before that label's
+    # optimizer step.
+    iteration = first_scheduled_iteration - 1
     profiler = IterationProfiler()
     fn_lpips = lpips.LPIPS(net='alex').cuda().eval()
     depth_guidance_checkpoint = "depth-anything/Depth-Anything-V2-base-hf"
@@ -797,6 +836,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     global_opacity_loss_weight = float(getattr(opt, "global_opacity_loss_weight", 0.02))
     mono_depth_loss_until_iter = int(getattr(opt, "mono_depth_loss_until_iter", 40_000))
     mono_normal_loss_until_iter = int(getattr(opt, "mono_normal_loss_until_iter", 20_000))
+    lpips_loss_until_iter = int(getattr(opt, "lpips_loss_until_iter", 5_000))
     local_opacity_loss_from_iter = int(getattr(opt, "local_opacity_loss_from_iter", 15_000))
     local_opacity_loss_until_iter = int(getattr(opt, "local_opacity_loss_until_iter", -1))
     local_opacity_loss_weight = float(getattr(opt, "local_opacity_loss_weight", 0.01))
@@ -1140,7 +1180,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # torch.cuda.empty_cache()
                 # gc.collect()
                 #print("image", image.shape, image.dtype, image.device, "gt", gt_image.shape)
-                if iteration <= 5000:
+                if lpips_loss_until_iter < 0 or iteration <= lpips_loss_until_iter:
                     lp = fn_lpips(image[None], gt_image[None], normalize=True)
                     #lp = lpips_tiled(image[None], gt_image[None])
                     #print("test9")
@@ -2042,6 +2082,9 @@ if __name__ == "__main__":
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000])
     parser.add_argument("--save_iterations", nargs="+", type=int, default=[1_000])
+    parser.add_argument("--checkpoint_interval", type=int, default=5_000,
+                        help="Add periodic checkpoints at this interval; 0 disables periodic saves. "
+                             "The explicitly requested save iterations and final iteration are always saved.")
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--start_checkpoint", type=str, default = None)
     
@@ -2080,7 +2123,14 @@ if __name__ == "__main__":
         
     if args.exhaust_test:
         args.test_iterations = args.test_iterations + [i for i in range(0,args.iterations + 1,5000)]
-    args.save_iterations = args.save_iterations + [i for i in range(5000,args.iterations + 1,5000)]
+    if args.checkpoint_interval < 0:
+        parser.error("--checkpoint_interval must be >= 0")
+    args.save_iterations = list(args.save_iterations)
+    if args.checkpoint_interval > 0:
+        args.save_iterations += list(range(args.checkpoint_interval,
+                                           args.iterations + 1,
+                                           args.checkpoint_interval))
+    args.save_iterations = sorted(set(args.save_iterations + [args.iterations]))
     setup_seed(args.seed)
     
     print("Optimizing " + args.model_path)

@@ -149,9 +149,9 @@ OptimizationParams:
   local_alpha_loss_weight: 0.0
   local_alpha_loss_from_iter: 7000
   local_alpha_loss_until_iter: 20000
-  local_mlp_output_loss_weight: 0.01
-  local_mlp_output_loss_from_iter: 10_000
-  local_mlp_output_loss_until_iter: 20000
+  local_mlp_output_loss_weight: 0.001
+  local_mlp_output_loss_from_iter: 7_000
+  lpips_loss_until_iter: -1
   local_opacity_loss_from_iter: 12_000
   local_opacity_loss_weight: 0.0
   local_feature_loss_weight: 0.0
@@ -160,7 +160,7 @@ OptimizationParams:
   density_entropy_loss_from_iter: 1_500
   # monocular priors cut early: depth to 5k, normal to 9k
   mono_depth_loss_until_iter: 5_000
-  mono_normal_loss_until_iter: 30_000
+  mono_normal_loss_until_iter: 15_000
   opacity_periodic_reset_interval: -1
   opacity_periodic_reset_value: 0.5
   opacity_periodic_reset_from_iter: 0

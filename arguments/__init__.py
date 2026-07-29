@@ -39,9 +39,9 @@ class ParamGroup:
 
     def extract(self, args):
         group = GroupParams()
-        for arg in vars(args).items():
-            if arg[0] in vars(self) or ("_" + arg[0]) in vars(self):
-                setattr(group, arg[0], arg[1])
+        for key, default in vars(self).items():
+            name = key[1:] if key.startswith("_") else key
+            setattr(group, name, getattr(args, name, default))
         return group
 
 class ModelParams(ParamGroup): 
@@ -123,6 +123,27 @@ class PipelineParams(ParamGroup):
         self.local_light_mlp_geo_inputs = True
         # keep cos_nr as an mlp2 input but stop its gradient into the normals
         self.local_light_mlp_detach_cos = False
+        # append the Schlick Fresnel basis (1 - clamp(cos_nr, 0, 1))^5 as one
+        # extra input column to the GLOBAL light_mlp so the env light can learn
+        # grazing-angle (Fresnel) falloff.  Widens light_mlp input by 1;
+        # resuming an older checkpoint zero-init widens the first layer via
+        # ensure_parity_light_env (function-preserving, influence grows from 0).
+        self.light_mlp_fresnel_input = False
+        # append raw cos_nr (= cos(normal, reflection) = n.v, clamped to
+        # [-1, 1] at computation) as one extra GLOBAL light_mlp input column:
+        # smooth full-range angular dependence (Ref-NeRF style), more flexible
+        # but more shortcut-prone than the Schlick basis.  Same widening /
+        # resume behavior; column appended after the fresnel one.
+        self.light_mlp_cos_input = False
+        # detach cos_nr inside the GLOBAL light_mlp fresnel/cos input columns
+        # (mirrors local_light_mlp_detach_cos): the angular value still informs
+        # the MLP in the forward pass, but photometric gradients can no longer
+        # bend the normals through these columns — d(1-cos)^5 = -5(1-cos)^4
+        # blows up exactly at grazing angles where the floor reflections live,
+        # the suspected instability of the non-detached columns.  Normals keep
+        # their usual gradient paths (reflection-dir env sampling, geometry
+        # losses).  Function-identical forward, so it can be toggled on resume.
+        self.light_mlp_detach_cos = False
         super().__init__(parser, "Pipeline Parameters")
 
 class OptimizationParams(ParamGroup):
@@ -176,7 +197,7 @@ class OptimizationParams(ParamGroup):
         # temporal split t-grad selection: top (1 - quantile) fraction of points
         # by accumulated |dL/dt| are split each event (0.99 = top 1%, the exp78
         # record setting; lower = more temporal splits, higher = fewer)
-        self.densify_grad_t_quantile = 0.99
+        self.densify_grad_t_quantile = 0.98
         # absolute floor on the quantile-derived |dL/dt| threshold: once the
         # population converges below the floor, no more temporal splits happen
         # (0 = pure quantile, the exp78 behavior; measured signal scale in
@@ -190,6 +211,10 @@ class OptimizationParams(ParamGroup):
         # generalized: "iter:bs,iter:bs,..." switches AT iter (supports down-
         # switching); empty = use batch_size_final; overrides it when set.
         self.batch_size_schedule = ""
+        # Training checkpoints are written before the optimizer step bearing the
+        # checkpoint's iteration label.  Enable this for controlled branches that
+        # must replay that pending iteration rather than start at label + 1.
+        self.resume_replay_checkpoint_iteration = False
         # phase-start iterations (previously hardcoded), exposed so schedules can
         # be rescaled e.g. for larger batch sizes. Defaults = historical values.
         self.lighting_start_iter = 9000
@@ -267,6 +292,8 @@ class OptimizationParams(ParamGroup):
         # -1 = never stop. Defaults = historical hardcoded schedule.
         self.mono_depth_loss_until_iter = 40_000
         self.mono_normal_loss_until_iter = 20_000
+        # LPIPS loss applies while iteration <= this; -1 = never stop
+        self.lpips_loss_until_iter = 5_000
         self.densify_specular_time_threshold = 0.0000003
         self.temporal_split_from_iter = 25_000
         self.temporal_split_until_iter = 35_000
@@ -318,8 +345,8 @@ def get_combined_args(parser : ArgumentParser):
         with open(cfgfilepath) as cfg_file:
             print("Config file found: {}".format(cfgfilepath))
             cfgfile_string = cfg_file.read()
-    except TypeError:
-        print("Config file not found at")
+    except (TypeError, FileNotFoundError):
+        print("Config file not found, skipping cfg_args")
         pass
     args_cfgfile = eval(cfgfile_string)
 

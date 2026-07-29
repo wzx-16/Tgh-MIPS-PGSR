@@ -1,3 +1,6 @@
+# CONTROLLED ABLATION: flat-top global temporal opacity OFF.
+# Base: abuzabi_nolocal4.yaml.  The only algorithmic change is
+# PipelineParams.temporal_opacity_mode: flat_window -> normalized_sigmoid.
 # abuzabi 60 frames (frames 20-79, t 0.6667-2.6333, 30fps) @ 60k iters; batch-2 tail from 55k;
 # = the exp111 champion recipe (batch 1 -> 2 in split window -> 4 tail, reset 0.5,
 # static sph16, abs-t-grad splits, affine) with all schedules scaled x7/6 and the
@@ -16,7 +19,7 @@ exhaust_test: True
 ModelParams:
   sh_degree: 1
   source_path: "/root/autodl-tmp/projects/Tgh-MIPS-PGSR/data/N3V/abuzabi"
-  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/abuzabi"
+  model_path: "/root/autodl-tmp/projects/4dRefgs_abuzabi/output/ablation_study_20260729/models/abuzabi_no_flat"
   images: "images"
   resolution: 1
   white_background: False
@@ -36,7 +39,7 @@ PipelineParams:
   env_optimize_until: 1000000000
   env_optimize_from: 0
   eval_shfs_4d: True
-  temporal_opacity_mode: "flat_window"
+  temporal_opacity_mode: "normalized_sigmoid"
   temporal_flat_radius_mult: 1.0
   sph_residual_keyframes: 0
   sph_residual_from_iter: 20_000
@@ -61,7 +64,7 @@ PipelineParams:
 
 OptimizationParams:
   iterations: 60_000
-  batch_size_schedule: "50000:2"
+  batch_size_schedule: "55000:2"
   position_lr_init: 0.00016
   position_t_lr_init: -1.0
   position_lr_final: 0.0000032
@@ -97,7 +100,7 @@ OptimizationParams:
   densify_grad_threshold: 0.0002
   densify_grad_t_threshold: 0.002
   temporal_split_from_iter: 30_000
-  temporal_split_until_iter: 50_000
+  temporal_split_until_iter: 45_000
   densify_specular_time_threshold: 0.00001
   opacity_zero_reset_iter: -1          # one-time reset disabled (was 0.5 mid-run)
   # --- scene time model: 100 frames @30fps, t in [0, 3.3] ---
@@ -113,11 +116,11 @@ OptimizationParams:
   inside_diffuse_source: "albedo"
   spec_light_combine: "exp_sum"
   local_light_mlp_zero_init: True
-  local_mlp_output_loss_weight: 0.05
+  local_mlp_output_loss_weight: 0.0
   local_mlp_output_loss_from_iter: 12_000
   local_opacity_loss_weight: 0.0
   lighting_start_iter: 9_000
-  local_feature_start_iter: 12_000
+  local_feature_start_iter: 1_000_000
   reset_opacity_high_until_iter: 25_000
   densify_interval_schedule: "3001:100,15000:200,25000:300,35000:500,45000:500,-1:1000"
   global_opacity_loss_until_iter: 30_000
@@ -151,3 +154,7 @@ OptimizationParams:
   cam_affine_lr: 0.001
   cam_affine_from_iter: 1000
   cam_affine_ssim_gate: 0.5
+  densify_grad_t_quantile: 0.99
+  light_mlp_fresnel_input: True
+  light_mlp_cos_input: False
+  light_mlp_detach_cos: True
