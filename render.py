@@ -236,6 +236,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     in_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_in")
     error_path = os.path.join(model_path, f"{name}_{id}", output_tag, "error")
     delta_normal_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_delta_normal")
+    roughness_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_roughness")
     diffuse_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_diffuse")
     local_feature_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_local_feature")
     local_usage_path = os.path.join(model_path, f"{name}_{id}", output_tag, "rendered_local_usage")
@@ -255,6 +256,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
     makedirs(in_path, exist_ok=True)
     makedirs(error_path, exist_ok=True)
     makedirs(delta_normal_path, exist_ok=True)
+    makedirs(roughness_path, exist_ok=True)
     makedirs(diffuse_path, exist_ok=True)
     makedirs(local_feature_path, exist_ok=True)
     makedirs(local_usage_path, exist_ok=True)
@@ -379,6 +381,7 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
         render_alpha = render_package["alpha"]
         render_in = render_package["rendered_in"]
         rendered_delta_normal = render_package["rendered_delta_normal"]
+        render_roughness = render_package["rendered_rough"]
         render_diffuse = render_package["rendered_diffuse"]
         psnr_avg += psnr(rendering.clamp(0.0, 1.0), gt.cuda())
         # h, w = feature_map.shape[1:]
@@ -430,6 +433,10 @@ def render_set(model_path, name, iteration, views, gaussians, local_gaussians, t
             torchvision.utils.save_image(spec_rgb, os.path.join(spec_path, 'spec_rgb_' + output_stem + ".png"))
         if rendered_delta_normal is not None:
             torchvision.utils.save_image((rendered_delta_normal + 1) / 2, os.path.join(delta_normal_path, output_stem + ".png"))
+        torchvision.utils.save_image(
+            render_roughness.permute(2, 0, 1).clamp(0.0, 1.0),
+            os.path.join(roughness_path, output_stem + ".png"),
+        )
         if render_diffuse is not None:
             torchvision.utils.save_image(render_diffuse, os.path.join(diffuse_path, output_stem + ".png"))
     with open(os.path.join(model_path, f"{name}_{id}", output_tag, "manifest.tsv"), "w") as manifest_file:

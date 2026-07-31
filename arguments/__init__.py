@@ -285,9 +285,13 @@ class OptimizationParams(ParamGroup):
         self.local_prune_sample_fraction = 0.1
         # local reset_opacity_high (>0.995 -> 0.99) runs on the opacity reset
         # cadence while iteration <= this; negative disables
-        self.local_reset_opacity_high_until_iter = 30_000
+        self.local_reset_opacity_high_until_iter = 20_000
         self.density_entropy_loss_from_iter = 3_000
         self.density_entropy_loss_weight = 0.01
+        # PGSR-style single-view rendered-normal/depth-normal consistency loss.
+        # The strict training gate preserves the historical first active step
+        # at iteration 3,001 when this retains its default value.
+        self.single_view_depth_normal_loss_from_iter = 3_000
         # monocular prior losses (sgt_depth / sgt_normal) stop iterations;
         # -1 = never stop. Defaults = historical hardcoded schedule.
         self.mono_depth_loss_until_iter = 40_000

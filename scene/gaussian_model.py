@@ -3617,6 +3617,16 @@ class GaussianModel:
                 sample_mask = torch.rand(prune_mask.shape[0], device=prune_mask.device) < prune_sample_fraction
                 prune_mask = torch.logical_and(prune_mask, sample_mask)
         else:
+            # n_init_points = self.get_xyz.shape[0]
+            # padded_inside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            # padded_inside_mask[:gs_in.shape[0]] = gs_in
+
+            # padded_outside_mask = torch.zeros((n_init_points), device="cuda", dtype=torch.bool)
+            # padded_outside_mask[:outside_mask.shape[0]] = outside_mask
+            # # outside-sphere bar is capped at the historical 0.05 but follows
+            # # min_opacity below it, so callers with a lower bar (local branch
+            # # at 0.01) get it on both sides of the env sphere
+            # prune_mask = torch.logical_or(torch.logical_and((self.get_opacity < min_opacity).squeeze(), padded_inside_mask), torch.logical_and((self.get_opacity < min(min_opacity, 0.05)).squeeze(), padded_outside_mask))
             prune_mask = torch.zeros_like(self.get_opacity.squeeze(), dtype=torch.bool)
         deferred_prune_filter = merge_prune_filters(deferred_prune_filter)
         if deferred_prune_filter is not None:

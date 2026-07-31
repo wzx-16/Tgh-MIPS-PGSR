@@ -836,6 +836,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     global_opacity_loss_weight = float(getattr(opt, "global_opacity_loss_weight", 0.02))
     mono_depth_loss_until_iter = int(getattr(opt, "mono_depth_loss_until_iter", 40_000))
     mono_normal_loss_until_iter = int(getattr(opt, "mono_normal_loss_until_iter", 20_000))
+    single_view_depth_normal_loss_from_iter = int(
+        getattr(opt, "single_view_depth_normal_loss_from_iter", 3_000)
+    )
     lpips_loss_until_iter = int(getattr(opt, "lpips_loss_until_iter", 5_000))
     local_opacity_loss_from_iter = int(getattr(opt, "local_opacity_loss_from_iter", 15_000))
     local_opacity_loss_until_iter = int(getattr(opt, "local_opacity_loss_until_iter", -1))
@@ -1456,18 +1459,33 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     #loss += 0.1 * ((time_duration[1] - time_duration[0]) - (((velocity_norm + velocity_norm2 + velocity_norm3) / 2 + 1) * effect_range)).clip(min=0).mean()
                     #loss += 0.1 * ((velocity_norm2 + velocity_norm3) / (velocity_norm + 1e-6)).mean()
 
-                # single-view loss
+                # PGSR-style single-view rendered-normal/depth-normal
+                # consistency. Keep this schedule independent from the other
+                # regularizers historically grouped under the 3k gate below.
+                rendered_normal_unit = None
+                if iteration > single_view_depth_normal_loss_from_iter:
+                    rendered_normal_unit = torch.nn.functional.normalize(
+                        render_pkg["rendered_normal"], dim=0, eps=1e-20
+                    )
+                    depth_normal_unit = torch.nn.functional.normalize(
+                        render_pkg["depth_normal"], dim=0, eps=1e-20
+                    )
+                    loss += 0.03 * (
+                        1 - (depth_normal_unit * rendered_normal_unit).sum(dim=0)
+                    ).mean()
+
+                # Other single-view regularizers retain their historical gate.
                 if iteration > 3000:
                     # if iteration < 5000:
                     #     weight = 0.05
                     # else:
                     #weight = 0.03
-                    normal = render_pkg["rendered_normal"]
-                    depth_normal = render_pkg["depth_normal"]
-                    normal = torch.nn.functional.normalize(normal, dim=0, eps=1e-20)
-                    depth_normal = torch.nn.functional.normalize(depth_normal, dim=0, eps=1e-20)
+                    if rendered_normal_unit is None:
+                        rendered_normal_unit = torch.nn.functional.normalize(
+                            render_pkg["rendered_normal"], dim=0, eps=1e-20
+                        )
+                    normal = rendered_normal_unit
                     #normal_grad = get_img_grad_weight_avg(normal)
-                    #depth_normal_grad = get_img_grad_weight_avg(depth_normal)
                     
                     if n_gt is not None:
                         n_gt = n_gt.cuda()
@@ -1489,21 +1507,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         
                     #     # cv2.imwrite("./test/debug_render1.png", (((de0-de0.min())/(de0.max()-de0.min())).clip(min=0, max=1).squeeze()[..., None][..., [0]*3].detach().cpu().numpy() * 255).astype(np.uint8))
 
-                    image_weight = None
-                    # image_weight = (1.0 - get_img_grad_weight(gt_image))
-                    # image_weight = (image_weight).clamp(0,1).detach() ** 2
-                    if True:
-                        # image_weight = erode(image_weight[None,None]).squeeze()
-                        #normal_loss_abs = 0.01 * (image_weight * (((depth_normal - normal)).abs().sum(0))).mean()
-                        normal_loss = 0.03 * ((1 - ((depth_normal * normal).sum(dim=0)))).mean()
-                        #normal_grad_loss = 0.01 * (depth_grad * ((render_normal_grad.detach() - depth_normal_grad).abs().sum(dim=0))).mean()
-                        #pass
-                    else:
-                        pass
-                       # normal_loss = weight * (((depth_normal - normal)).abs().sum(0)).mean()
-                    loss += (normal_loss)# + (((normal_image - normal)).abs().sum(0)).mean()
-                    #loss += (normal_loss_abs)
-                    #loss += normal_grad_loss
                     loss += (1 - render_pkg["alpha"]).mean() * 0.1  # encourage alpha to be 1
                     # if iteration > 20000:
                     #     loss += (-opacity * torch.log(opacity)).mean() * 0.05
@@ -1867,7 +1870,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                         # normalized local feature map never changes abruptly.
                         # fraction <= 0 disables opacity/size pruning entirely;
                         # split-parent cleanup always runs via the deferred filter.
-                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, local_thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=False, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor, prune_sample_fraction=local_prune_sample_fraction)
+                        local_gaussians.densify_and_prune(opt.densify_grad_threshold / 2, local_thresh_opa_prune, scene.cameras_extent, local_size_threshold, iteration, opt.densify_grad_t_threshold, local_spec_time_thr, disable_prune=True, split_time=local_densify_split_time, grad_t_quantile=opt.densify_grad_t_quantile, grad_t_floor=opt.densify_grad_t_floor, prune_sample_fraction=local_prune_sample_fraction)
 
                     if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                         if iteration <= local_reset_opacity_high_until_iter:
