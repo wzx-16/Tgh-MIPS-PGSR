@@ -59,6 +59,7 @@ class ModelParams(ParamGroup):
         self.loaded_pth = ""
         self.frame_ratio = 1
         self.frame_filter = ""
+        self.test_transforms = ""
         self.dataloader = False
         super().__init__(parser, "Loading Parameters", sentinel)
 

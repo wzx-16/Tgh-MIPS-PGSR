@@ -391,12 +391,15 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
     
     return cam_infos
 
-def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False, render=False, frame_filter=None):
+def readNerfSyntheticInfo(path, white_background, eval, extension=".png", num_pts=100_000, time_duration=None, num_extra_pts=0, frame_ratio=1, dataloader=False, render=False, frame_filter=None, test_transforms=None):
     
     print("Reading Training Transforms")
     train_cam_infos = readCamerasFromTransforms(path, "transforms_train.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader, frame_filter=frame_filter)
-    print("Reading Test Transforms")
-    test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json" if not path.endswith('lego') else "transforms_val.json", white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader, frame_filter=frame_filter)
+    if not test_transforms:
+        dataset_name = os.path.basename(os.path.normpath(path))
+        test_transforms = "transforms_val.json" if dataset_name == "lego" else "transforms_test.json"
+    print(f"Reading Test Transforms: {test_transforms}")
+    test_cam_infos = readCamerasFromTransforms(path, test_transforms, white_background, extension, time_duration=time_duration, frame_ratio=frame_ratio, dataloader=dataloader, frame_filter=frame_filter)
     
     if not eval:
         train_cam_infos.extend(test_cam_infos)

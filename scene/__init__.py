@@ -79,7 +79,20 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, num_pts_ratio=num_pts_ratio)
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):
             print("Found transforms_train.json file, assuming Blender data set!")
-            scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.eval, num_pts=num_pts, time_duration=time_duration, extension=args.extension, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader, render=skip_source_point_cloud, frame_filter=getattr(args, "frame_filter", ""))
+            scene_info = sceneLoadTypeCallbacks["Blender"](
+                args.source_path,
+                args.white_background,
+                args.eval,
+                num_pts=num_pts,
+                time_duration=time_duration,
+                extension=args.extension,
+                num_extra_pts=args.num_extra_pts,
+                frame_ratio=args.frame_ratio,
+                dataloader=args.dataloader,
+                render=skip_source_point_cloud,
+                frame_filter=getattr(args, "frame_filter", ""),
+                test_transforms=getattr(args, "test_transforms", ""),
+            )
         elif os.path.exists(os.path.join(args.source_path, "calibration_full.json")):
             print("Found calibration_full.json file, assuming THU data set!")
             scene_info = sceneLoadTypeCallbacks["THU"](args.source_path, args.white_background, num_pts=num_pts, time_duration=time_duration, num_extra_pts=args.num_extra_pts, frame_ratio=args.frame_ratio, dataloader=args.dataloader)
